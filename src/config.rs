@@ -209,6 +209,34 @@ impl AudioFormat {
     }
 }
 
+/// Цветовая тема интерфейса. Палитры — в `theme.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Theme {
+    #[default]
+    Classic,
+    Contrast,
+    Blue,
+    Light,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 4] = [Theme::Classic, Theme::Contrast, Theme::Blue, Theme::Light];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Classic => "Классическая",
+            Theme::Contrast => "Контрастная",
+            Theme::Blue => "Синяя",
+            Theme::Light => "Светлая",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -220,6 +248,7 @@ pub struct Config {
     pub audio_format: AudioFormat,
     /// Порт локального SOCKS5-прокси (VPN-клиента) на 127.0.0.1; `None` — без прокси.
     pub proxy_port: Option<u16>,
+    pub theme: Theme,
 }
 
 impl Default for Config {
@@ -231,6 +260,7 @@ impl Default for Config {
             quality: Quality::default(),
             audio_format: AudioFormat::default(),
             proxy_port: None,
+            theme: Theme::default(),
         }
     }
 }
@@ -350,5 +380,25 @@ mod tests {
         assert_eq!(config.audio_format, AudioFormat::Opus);
         assert_eq!(config.music_dir, default_music_dir());
         assert_eq!(config.browser, Browser::Yandex);
+        assert_eq!(config.theme, Theme::Classic);
+    }
+
+    #[test]
+    fn theme_roundtrip() {
+        let config = Config {
+            theme: Theme::Light,
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("theme = \"light\""));
+        assert_eq!(toml::from_str::<Config>(&text).unwrap().theme, Theme::Light);
+    }
+
+    #[test]
+    fn theme_labels_fit_selector() {
+        // Значение селектора в настройках — 18 символов.
+        for theme in Theme::ALL {
+            assert!(theme.label().chars().count() <= 18, "{theme:?}");
+        }
     }
 }

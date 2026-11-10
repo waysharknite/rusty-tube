@@ -16,7 +16,7 @@ use ratatui::{
 };
 
 use crate::{
-    config::{self, AudioFormat, Browser, Config, Quality},
+    config::{self, AudioFormat, Browser, Config, Quality, Theme},
     download::{self, DownloadSummary, Kind},
     input::{Input, clipboard_text},
     music::{self, Track},
@@ -95,19 +95,22 @@ pub struct Confirm {
 pub mod field {
     pub const QUALITY: usize = 0;
     pub const AUDIO: usize = 1;
-    pub const BROWSER: usize = 2;
-    pub const PROXY: usize = 3;
-    pub const FOLDER: usize = 4;
-    pub const BROWSE: usize = 5;
-    pub const MUSIC_FOLDER: usize = 6;
-    pub const MUSIC_BROWSE: usize = 7;
-    pub const SAVE: usize = 8;
-    pub const CANCEL: usize = 9;
+    pub const THEME: usize = 2;
+    pub const BROWSER: usize = 3;
+    pub const PROXY: usize = 4;
+    pub const FOLDER: usize = 5;
+    pub const BROWSE: usize = 6;
+    pub const MUSIC_FOLDER: usize = 7;
+    pub const MUSIC_BROWSE: usize = 8;
+    pub const SAVE: usize = 9;
+    pub const CANCEL: usize = 10;
 }
 
 pub struct SettingsForm {
     pub quality: usize,
     pub audio: usize,
+    /// Пока окно открыто, интерфейс рисуется выбранной здесь темой (предпросмотр).
+    pub theme: usize,
     pub browser: usize,
     /// Порт SOCKS5-прокси; пусто — без прокси.
     pub proxy: Input,
@@ -136,7 +139,10 @@ impl SettingsForm {
     }
 
     fn is_selector(&self) -> bool {
-        matches!(self.focus, field::QUALITY | field::AUDIO | field::BROWSER)
+        matches!(
+            self.focus,
+            field::QUALITY | field::AUDIO | field::THEME | field::BROWSER
+        )
     }
 
     /// Вставка текста в поле под фокусом; в поле порта попадают только цифры.
@@ -708,6 +714,7 @@ impl App {
         self.modal = Some(Modal::Settings(SettingsForm {
             quality: self.config.quality.index(),
             audio: self.config.audio_format.index(),
+            theme: self.config.theme.index(),
             browser: self.config.browser.index(),
             proxy: Input::new(
                 self.config
@@ -1170,7 +1177,9 @@ impl App {
             return;
         };
         match form.focus {
-            field::QUALITY | field::AUDIO | field::BROWSER => cycle_selector(form, true),
+            field::QUALITY | field::AUDIO | field::THEME | field::BROWSER => {
+                cycle_selector(form, true)
+            }
             field::BROWSE | field::MUSIC_BROWSE => {
                 let (input, title) = if form.focus == field::BROWSE {
                     (&mut form.folder, "Папка для сохранения видео")
@@ -1234,6 +1243,7 @@ impl App {
             audio_format: AudioFormat::ALL[form.audio],
             browser: Browser::ALL[form.browser],
             proxy_port,
+            theme: Theme::ALL[form.theme],
         };
         if let Err(e) = config.save() {
             form.error = Some(format!("Не удалось сохранить настройки: {e}"));
@@ -1362,6 +1372,7 @@ fn cycle_selector(form: &mut SettingsForm, forward: bool) {
     let (value, len) = match form.focus {
         field::QUALITY => (&mut form.quality, Quality::ALL.len()),
         field::AUDIO => (&mut form.audio, AudioFormat::ALL.len()),
+        field::THEME => (&mut form.theme, Theme::ALL.len()),
         field::BROWSER => (&mut form.browser, Browser::ALL.len()),
         _ => return,
     };

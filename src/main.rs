@@ -6,6 +6,7 @@ mod config;
 mod download;
 mod input;
 mod music;
+mod theme;
 mod ui;
 mod worker;
 

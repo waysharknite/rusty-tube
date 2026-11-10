@@ -10,19 +10,23 @@ use ratatui::{
 
 use crate::{
     app::{App, Confirm, DownloadView, Focus, Modal, Mode, SearchView, SettingsForm, Stage, field},
-    config::{AudioFormat, Browser, Quality},
+    config::{AudioFormat, Browser, Quality, Theme},
     download::Kind,
     input::Input,
+    theme::Palette,
 };
 
-const ACCENT: Color = Color::LightRed;
-const DIM: Color = Color::DarkGray;
-const OK: Color = Color::Green;
-const ERR: Color = Color::Red;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hits = Default::default();
+    // Пока открыты настройки, рисуем выбранной там темой — это предпросмотр.
+    let theme = match &app.modal {
+        Some(Modal::Settings(form)) => Theme::ALL[form.theme],
+        _ => app.config.theme,
+    };
+    let p = &theme.palette();
+    frame.render_widget(Block::new().style(p.base), frame.area());
     let [top, body, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -30,21 +34,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    draw_top_bar(frame, app, top);
+    draw_top_bar(frame, app, top, p);
     match &app.stage {
-        Stage::Startup => draw_startup(frame, app, body),
-        Stage::Ready => draw_main(frame, app, body),
+        Stage::Startup => draw_startup(frame, app, body, p),
+        Stage::Ready => draw_main(frame, app, body, p),
         Stage::Fatal(message) => {
             let message = message.clone();
-            draw_fatal(frame, &message, body);
+            draw_fatal(frame, &message, body, p);
         }
     }
-    draw_status_bar(frame, app, bottom);
+    draw_status_bar(frame, app, bottom, p);
 
     let modal = app.modal.take();
     match &modal {
-        Some(Modal::Confirm(confirm)) => draw_confirm(frame, app, confirm),
-        Some(Modal::Settings(form)) => draw_settings(frame, app, form),
+        Some(Modal::Confirm(confirm)) => draw_confirm(frame, app, confirm, p),
+        Some(Modal::Settings(form)) => draw_settings(frame, app, form, p),
         None => {}
     }
     app.modal = modal;
@@ -54,10 +58,10 @@ fn spinner(app: &App) -> &'static str {
     SPINNER[app.tick % SPINNER.len()]
 }
 
-fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    frame.render_widget(Block::new().style(Style::new().bg(Color::Black)), area);
+fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
+    frame.render_widget(Block::new().style(Style::new().fg(p.text).bg(p.bar)), area);
     let title = Line::from(vec![
-        Span::styled(" ▶ ", Style::new().fg(ACCENT).bold()),
+        Span::styled(" ▶ ", Style::new().fg(p.accent).bold()),
         Span::styled("rusty-tube", Style::new().bold()),
     ]);
     frame.render_widget(Paragraph::new(title), area);
@@ -71,20 +75,20 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         let rect = Rect::new(x, area.y, w, 1).intersection(area);
         let style = if app.mode == mode {
             Style::new()
-                .fg(Color::Black)
-                .bg(if ready { ACCENT } else { DIM })
+                .fg(p.on_accent)
+                .bg(if ready { p.accent } else { p.dim })
                 .bold()
         } else {
             Style::new()
-                .fg(if ready { Color::White } else { DIM })
-                .bg(Color::Black)
+                .fg(if ready { p.text } else { p.dim })
+                .bg(p.bar)
         };
         frame.render_widget(Paragraph::new(label).style(style), rect);
         app.hits.modes.push((rect, mode));
         x += w + 1;
     }
     let hint = Rect::new(x, area.y, 4, 1).intersection(area);
-    frame.render_widget(Paragraph::new("F3").fg(DIM), hint);
+    frame.render_widget(Paragraph::new("F3").fg(p.dim), hint);
 
     let settings_label = " Настройки F2 ";
     let exit_label = " Выход F10 ";
@@ -95,11 +99,11 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let button_style = |focused: bool, enabled: bool| {
         if !enabled {
-            Style::new().fg(DIM).bg(Color::Black)
+            Style::new().fg(p.dim).bg(p.bar)
         } else if focused {
-            Style::new().fg(Color::Black).bg(ACCENT).bold()
+            Style::new().fg(p.on_accent).bg(p.accent).bold()
         } else {
-            Style::new().fg(Color::White).bg(Color::DarkGray)
+            Style::new().fg(p.on_control).bg(p.control)
         }
     };
     frame.render_widget(
@@ -115,8 +119,8 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     app.hits.exit = exit;
 }
 
-fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let sep = Span::styled("  │  ", Style::new().fg(DIM));
+fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, p: &Palette) {
+    let sep = Span::styled("  │  ", Style::new().fg(p.dim));
     let (format_label, format, dir) = match app.mode {
         Mode::Video => (
             " Качество: ",
@@ -130,24 +134,24 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ),
     };
     let line = Line::from(vec![
-        Span::styled(format_label, Style::new().fg(DIM)),
+        Span::styled(format_label, Style::new().fg(p.dim)),
         Span::raw(format),
         sep.clone(),
-        Span::styled("Cookie: ", Style::new().fg(DIM)),
+        Span::styled("Cookie: ", Style::new().fg(p.dim)),
         Span::raw(app.config.browser.label()),
         sep.clone(),
-        Span::styled("Прокси: ", Style::new().fg(DIM)),
+        Span::styled("Прокси: ", Style::new().fg(p.dim)),
         Span::raw(
             app.config
                 .proxy_port
                 .map_or_else(|| "нет".to_string(), |p| format!("SOCKS5 :{p}")),
         ),
         sep,
-        Span::styled("Папка: ", Style::new().fg(DIM)),
+        Span::styled("Папка: ", Style::new().fg(p.dim)),
         Span::raw(dir.to_string_lossy().into_owned()),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::new().bg(Color::Black)),
+        Paragraph::new(line).style(Style::new().fg(p.text).bg(p.bar)),
         area,
     );
 }
@@ -188,9 +192,9 @@ fn panel(title: &str, color: Color) -> Block<'_> {
 
 // ------------------------------------------------------------------ экраны
 
-fn draw_startup(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_startup(frame: &mut Frame, app: &App, area: Rect, p: &Palette) {
     let rect = centered(area, 84, 18);
-    let block = panel(&app.startup.title, ACCENT);
+    let block = panel(&app.startup.title, p.accent);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -206,7 +210,7 @@ fn draw_startup(frame: &mut Frame, app: &App, area: Rect) {
     let marker = if busy { spinner(app) } else { "•" };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{marker} "), Style::new().fg(ACCENT)),
+            Span::styled(format!("{marker} "), Style::new().fg(p.accent)),
             Span::raw(app.startup.step.as_str()),
         ])),
         step,
@@ -219,7 +223,7 @@ fn draw_startup(frame: &mut Frame, app: &App, area: Rect) {
         .rev()
         .take(log.height as usize)
         .rev()
-        .map(|l| Line::styled(l.as_str(), Style::new().fg(DIM)))
+        .map(|l| Line::styled(l.as_str(), Style::new().fg(p.dim)))
         .collect();
     frame.render_widget(Paragraph::new(lines), log);
 
@@ -230,28 +234,28 @@ fn draw_startup(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(hint_text)
-            .fg(DIM)
+            .fg(p.dim)
             .alignment(Alignment::Center),
         hint,
     );
 }
 
-fn draw_fatal(frame: &mut Frame, message: &str, area: Rect) {
+fn draw_fatal(frame: &mut Frame, message: &str, area: Rect, p: &Palette) {
     let rect = centered(area, 72, 12);
-    let block = panel("Ошибка", ERR);
+    let block = panel("Ошибка", p.err);
     let inner = block.inner(rect).inner(ratatui::layout::Margin::new(1, 1));
     frame.render_widget(block, rect);
     let [text, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), text);
     frame.render_widget(
         Paragraph::new("Нажмите любую клавишу для выхода")
-            .fg(DIM)
+            .fg(p.dim)
             .alignment(Alignment::Center),
         hint,
     );
 }
 
-fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let col = column(area, 96);
     let has_search = app.mode == Mode::Music && app.search.is_some();
     let panel_height = match (app.download.is_some(), has_search) {
@@ -306,7 +310,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(if focused { ACCENT } else { DIM }));
+        .border_style(Style::new().fg(if focused { p.accent } else { p.dim }));
     let inner = block.inner(input);
     frame.render_widget(block, input);
     app.hits.input = input;
@@ -314,7 +318,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let text_area = inner.inner(ratatui::layout::Margin::new(1, 0));
     let field = app.current_input();
     if field.is_empty() {
-        frame.render_widget(Paragraph::new(placeholder).fg(DIM), text_area);
+        frame.render_widget(Paragraph::new(placeholder).fg(p.dim), text_area);
     } else {
         let (visible, cursor) = field.visible(text_area.width as usize);
         frame.render_widget(Paragraph::new(visible), text_area);
@@ -327,20 +331,22 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let hint_line = match &app.notice {
-        Some(notice) => Line::styled(notice.as_str(), Style::new().fg(Color::Yellow)),
-        None if app.downloading() => Line::styled("Esc — прервать загрузку", Style::new().fg(DIM)),
-        None if app.searching() => Line::styled("Esc — остановить поиск", Style::new().fg(DIM)),
+        Some(notice) => Line::styled(notice.as_str(), Style::new().fg(p.warn)),
+        None if app.downloading() => {
+            Line::styled("Esc — прервать загрузку", Style::new().fg(p.dim))
+        }
+        None if app.searching() => Line::styled("Esc — остановить поиск", Style::new().fg(p.dim)),
         None if app.mode == Mode::Music && app.has_results() => Line::styled(
             "Enter — найти · ↓ — к результатам · Esc — очистить",
-            Style::new().fg(DIM),
+            Style::new().fg(p.dim),
         ),
         None if app.mode == Mode::Music => Line::styled(
             "Enter — найти или скачать по ссылке · F3 — видео",
-            Style::new().fg(DIM),
+            Style::new().fg(p.dim),
         ),
         None => Line::styled(
             "Enter — скачать · Esc — очистить · F3 — музыка",
-            Style::new().fg(DIM),
+            Style::new().fg(p.dim),
         ),
     };
     frame.render_widget(Paragraph::new(hint_line).alignment(Alignment::Center), hint);
@@ -356,6 +362,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
                 results_area,
                 focused,
                 searching.then(|| SPINNER[tick % SPINNER.len()]),
+                p,
             );
             app.hits.results = list;
             app.hits.result_rows = rows;
@@ -365,7 +372,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     if panel_height > 0 {
         let tick = app.tick;
         if let Some(view) = app.download.as_ref() {
-            let open = draw_download(frame, view, panel_area, SPINNER[tick % SPINNER.len()]);
+            let open = draw_download(frame, view, panel_area, SPINNER[tick % SPINNER.len()], p);
             app.hits.open_folder = open;
         }
     }
@@ -378,6 +385,7 @@ fn draw_results(
     area: Rect,
     focused: bool,
     spin: Option<&str>,
+    p: &Palette,
 ) -> (Rect, Vec<(Rect, usize)>) {
     let title = match spin {
         Some(spin) => format!(
@@ -387,7 +395,7 @@ fn draw_results(
         ),
         None => format!("Результаты: {}", search.query),
     };
-    let block = panel(&title, if focused { ACCENT } else { DIM });
+    let block = panel(&title, if focused { p.accent } else { p.dim });
     let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -398,12 +406,12 @@ fn draw_results(
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     if search.results.is_empty() {
         let text = match (&search.error, spin) {
-            (Some(err), _) => Line::styled(err.as_str(), Style::new().fg(ERR)),
+            (Some(err), _) => Line::styled(err.as_str(), Style::new().fg(p.err)),
             (None, Some(_)) => Line::styled(
                 "Каждый результат загружается около 2 секунд…",
-                Style::new().fg(DIM),
+                Style::new().fg(p.dim),
             ),
-            (None, None) => Line::styled("Ничего не найдено", Style::new().fg(DIM)),
+            (None, None) => Line::styled("Ничего не найдено", Style::new().fg(p.dim)),
         };
         frame.render_widget(Paragraph::new(text), list);
         return (list, Vec::new());
@@ -436,17 +444,13 @@ fn draw_results(
         let pad = width.saturating_sub(left.chars().count() + right.chars().count() + 2);
         let marker = if selected { "▶ " } else { "  " };
         let base = if selected && focused {
-            Style::new().fg(Color::Black).bg(ACCENT)
+            Style::new().fg(p.on_accent).bg(p.accent)
         } else if selected {
-            Style::new().bg(Color::DarkGray)
+            Style::new().fg(p.on_control).bg(p.control)
         } else {
             Style::new()
         };
-        let dim = if selected && focused {
-            base
-        } else {
-            base.fg(DIM)
-        };
+        let dim = if selected { base } else { base.fg(p.dim) };
         lines.push(Line::from(vec![
             Span::styled(marker, base.bold()),
             Span::styled(left, base.bold()),
@@ -459,14 +463,14 @@ fn draw_results(
     frame.render_widget(Paragraph::new(lines), list);
 
     let footer_text = match (&search.error, focused) {
-        (Some(err), _) => Line::styled(err.as_str(), Style::new().fg(Color::Yellow)),
+        (Some(err), _) => Line::styled(err.as_str(), Style::new().fg(p.warn)),
         (None, true) => Line::styled(
             "↑↓ — выбор · Enter — скачать · Esc — к поиску · Ctrl+O — папка",
-            Style::new().fg(DIM),
+            Style::new().fg(p.dim),
         ),
         (None, false) => Line::styled(
             "↓ или Tab — к списку · клик — выбрать, повторный клик — скачать",
-            Style::new().fg(DIM),
+            Style::new().fg(p.dim),
         ),
     };
     frame.render_widget(Paragraph::new(footer_text), footer);
@@ -484,13 +488,19 @@ fn truncate(text: &str, max: usize) -> String {
 }
 
 /// Возвращает область кнопки «Открыть папку» (если показана).
-fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str) -> Rect {
+fn draw_download(
+    frame: &mut Frame,
+    view: &DownloadView,
+    area: Rect,
+    spin: &str,
+    p: &Palette,
+) -> Rect {
     let (title, color) = match &view.result {
-        None if view.playlist => ("Загрузка плейлиста", ACCENT),
-        None if view.kind == Kind::Audio => ("Загрузка трека", ACCENT),
-        None => ("Загрузка", ACCENT),
-        Some(Ok(_)) => ("Готово", OK),
-        Some(Err(_)) => ("Ошибка", ERR),
+        None if view.playlist => ("Загрузка плейлиста", p.accent),
+        None if view.kind == Kind::Audio => ("Загрузка трека", p.accent),
+        None => ("Загрузка", p.accent),
+        Some(Ok(_)) => ("Готово", p.ok),
+        Some(Err(_)) => ("Ошибка", p.err),
     };
     let block = panel(title, color);
     let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
@@ -507,7 +517,7 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
     ])
     .areas(inner);
 
-    frame.render_widget(Paragraph::new(view.label.as_str()).fg(DIM), url);
+    frame.render_widget(Paragraph::new(view.label.as_str()).fg(p.dim), url);
 
     // История шагов: выполненные — галочкой, текущий — спиннером.
     let running = view.running();
@@ -520,16 +530,16 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
         .rev()
         .map(|step| {
             let (mark, style) = if step.done {
-                ("✓", Style::new().fg(OK))
+                ("✓", Style::new().fg(p.ok))
             } else if running {
-                (spin, Style::new().fg(ACCENT).bold())
+                (spin, Style::new().fg(p.accent).bold())
             } else if failed {
-                ("✗", Style::new().fg(ERR))
+                ("✗", Style::new().fg(p.err))
             } else {
                 ("•", Style::new())
             };
             let text_style = if step.done {
-                Style::new().fg(DIM)
+                Style::new().fg(p.dim)
             } else {
                 Style::new().bold()
             };
@@ -549,11 +559,11 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
     };
     frame.render_widget(
         Gauge::default()
-            .gauge_style(Style::new().fg(color).bg(Color::Black))
+            .gauge_style(Style::new().fg(color).bg(p.bar))
             .ratio(ratio)
             .label(Span::styled(
                 label,
-                Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
             ))
             .use_unicode(true),
         gauge,
@@ -565,7 +575,7 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
     } else {
         String::new()
     };
-    frame.render_widget(Paragraph::new(detail_text).fg(DIM), detail);
+    frame.render_widget(Paragraph::new(detail_text).fg(p.dim), detail);
 
     if let Some((index, total)) = view.item {
         let done = if running {
@@ -586,7 +596,7 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
         );
         frame.render_widget(
             Gauge::default()
-                .gauge_style(Style::new().fg(Color::Cyan).bg(Color::Black))
+                .gauge_style(Style::new().fg(p.info).bg(p.bar))
                 .ratio(ratio.clamp(0.0, 1.0))
                 .label(format!("{done}/{total}"))
                 .use_unicode(true),
@@ -602,7 +612,7 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
             .rev()
             .take(2)
             .rev()
-            .map(|l| Line::styled(l.as_str(), Style::new().fg(Color::Yellow)))
+            .map(|l| Line::styled(l.as_str(), Style::new().fg(p.warn)))
             .collect(),
         Some(Ok(summary)) => {
             let mut text = format!("Сохранено файлов: {}", summary.files.len());
@@ -618,9 +628,9 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
             );
             vec![
                 Line::from(vec![
-                    Span::styled(text, Style::new().fg(OK).bold()),
+                    Span::styled(text, Style::new().fg(p.ok).bold()),
                     Span::raw("  "),
-                    Span::styled(button, Style::new().fg(Color::Black).bg(OK)),
+                    Span::styled(button, Style::new().fg(p.on_accent).bg(p.ok)),
                 ]),
                 Line::styled(
                     summary.errors.last().map_or(
@@ -631,14 +641,14 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
                         String::as_str,
                     ),
                     Style::new().fg(if summary.errors.is_empty() {
-                        DIM
+                        p.dim
                     } else {
-                        Color::Yellow
+                        p.warn
                     }),
                 ),
             ]
         }
-        Some(Err(err)) => vec![Line::styled(err.as_str(), Style::new().fg(ERR))],
+        Some(Err(err)) => vec![Line::styled(err.as_str(), Style::new().fg(p.err))],
     };
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), result);
     open_rect
@@ -646,11 +656,11 @@ fn draw_download(frame: &mut Frame, view: &DownloadView, area: Rect, spin: &str)
 
 // ------------------------------------------------------------------ модальные окна
 
-fn button(frame: &mut Frame, area: Rect, label: &str, focused: bool) {
+fn button(frame: &mut Frame, area: Rect, label: &str, focused: bool, p: &Palette) {
     let style = if focused {
-        Style::new().fg(Color::Black).bg(ACCENT).bold()
+        Style::new().fg(p.on_accent).bg(p.accent).bold()
     } else {
-        Style::new().fg(Color::White).bg(Color::DarkGray)
+        Style::new().fg(p.on_control).bg(p.control)
     };
     frame.render_widget(
         Paragraph::new(label)
@@ -660,7 +670,7 @@ fn button(frame: &mut Frame, area: Rect, label: &str, focused: bool) {
     );
 }
 
-fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm) {
+fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm, p: &Palette) {
     let width = 66u16;
     let inner_width = width.saturating_sub(4) as usize;
     let body_height: usize = confirm
@@ -670,7 +680,8 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm) {
         .sum();
     let rect = centered(frame.area(), width, body_height as u16 + 6);
     frame.render_widget(Clear, rect);
-    let block = panel(&confirm.title, ACCENT);
+    frame.render_widget(Block::new().style(p.base), rect);
+    let block = panel(&confirm.title, p.accent);
     let inner = block.inner(rect).inner(ratatui::layout::Margin::new(1, 1));
     frame.render_widget(block, rect);
 
@@ -686,26 +697,28 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm) {
     let x = buttons.x + buttons.width.saturating_sub(total) / 2;
     let yes_rect = Rect::new(x, buttons.y, yes_w, 1);
     let no_rect = Rect::new(x + yes_w + 2, buttons.y, no_w, 1);
-    button(frame, yes_rect, &yes, confirm.yes_selected);
-    button(frame, no_rect, &no, !confirm.yes_selected);
+    button(frame, yes_rect, &yes, confirm.yes_selected, p);
+    button(frame, no_rect, &no, !confirm.yes_selected, p);
     app.hits.modal = vec![(yes_rect, 0), (no_rect, 1)];
 }
 
-fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
-    let rect = centered(frame.area(), 78, 27);
+fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Palette) {
+    let rect = centered(frame.area(), 78, 28);
     frame.render_widget(Clear, rect);
+    frame.render_widget(Block::new().style(p.base), rect);
     let title = if form.first_run {
         "Первоначальная настройка"
     } else {
         "Настройки"
     };
-    let block = panel(title, ACCENT);
+    let block = panel(title, p.accent);
     let inner = block.inner(rect).inner(ratatui::layout::Margin::new(2, 1));
     frame.render_widget(block, rect);
 
     let [
         quality,
         audio,
+        theme,
         _,
         browser,
         browser_hint,
@@ -722,6 +735,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
         _,
         help,
     ] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -750,6 +764,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
         "Качество видео",
         Quality::ALL[form.quality].label(),
         form.focus == field::QUALITY,
+        p,
     );
     hits.push((quality, field::QUALITY));
 
@@ -759,8 +774,19 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
         "Формат музыки",
         AudioFormat::ALL[form.audio].label(),
         form.focus == field::AUDIO,
+        p,
     );
     hits.push((audio, field::AUDIO));
+
+    selector(
+        frame,
+        theme,
+        "Тема оформления",
+        Theme::ALL[form.theme].label(),
+        form.focus == field::THEME,
+        p,
+    );
+    hits.push((theme, field::THEME));
 
     let chosen = Browser::ALL[form.browser];
     selector(
@@ -769,10 +795,11 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
         "Cookie из браузера",
         chosen.label(),
         form.focus == field::BROWSER,
+        p,
     );
     hits.push((browser, field::BROWSER));
     frame.render_widget(
-        Paragraph::new(format!("{:22}{}", "", chosen.location_hint())).fg(DIM),
+        Paragraph::new(format!("{:22}{}", "", chosen.location_hint())).fg(p.dim),
         browser_hint,
     );
 
@@ -789,9 +816,9 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
         1,
     );
     let field_style = if proxy_focused {
-        Style::new().fg(Color::Black).bg(ACCENT)
+        Style::new().fg(p.on_accent).bg(p.accent)
     } else {
-        Style::new().bg(Color::DarkGray)
+        Style::new().fg(p.on_control).bg(p.control)
     };
     frame.render_widget(Paragraph::new("").style(field_style), proxy_field);
     let proxy_text = proxy_field.inner(ratatui::layout::Margin::new(1, 0));
@@ -806,7 +833,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
             "{:22}127.0.0.1:<порт> из VPN-клиента · пусто — без прокси",
             ""
         ))
-        .fg(DIM),
+        .fg(p.dim),
         proxy_hint,
     );
 
@@ -815,22 +842,22 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
         form,
         &mut hits,
         (folder_label, folder),
-        "Папка для видео",
-        &form.folder,
+        ("Папка для видео", &form.folder),
         (field::FOLDER, field::BROWSE),
+        p,
     );
     folder_field(
         frame,
         form,
         &mut hits,
         (music_label, music_folder),
-        "Папка для музыки",
-        &form.music_folder,
+        ("Папка для музыки", &form.music_folder),
         (field::MUSIC_FOLDER, field::MUSIC_BROWSE),
+        p,
     );
 
     if let Some(err) = &form.error {
-        frame.render_widget(Paragraph::new(err.as_str()).fg(ERR), error);
+        frame.render_widget(Paragraph::new(err.as_str()).fg(p.err), error);
     }
 
     let save_w = 14;
@@ -838,11 +865,11 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
     let total = save_w + if form.first_run { 0 } else { cancel_w + 2 };
     let x = buttons.right().saturating_sub(total);
     let save_rect = Rect::new(x, buttons.y, save_w, 1);
-    button(frame, save_rect, "Сохранить", form.focus == field::SAVE);
+    button(frame, save_rect, "Сохранить", form.focus == field::SAVE, p);
     hits.push((save_rect, field::SAVE));
     if !form.first_run {
         let cancel_rect = Rect::new(x + save_w + 2, buttons.y, cancel_w, 1);
-        button(frame, cancel_rect, "Отмена", form.focus == field::CANCEL);
+        button(frame, cancel_rect, "Отмена", form.focus == field::CANCEL, p);
         hits.push((cancel_rect, field::CANCEL));
     }
 
@@ -853,7 +880,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm) {
     };
     frame.render_widget(
         Paragraph::new(help_text)
-            .fg(DIM)
+            .fg(p.dim)
             .alignment(Alignment::Center),
         help,
     );
@@ -866,20 +893,20 @@ fn folder_field(
     form: &SettingsForm,
     hits: &mut Vec<(Rect, usize)>,
     (label, area): (Rect, Rect),
-    title: &str,
-    input: &Input,
+    (title, input): (&str, &Input),
     (text_field, browse_field): (usize, usize),
+    p: &Palette,
 ) {
     frame.render_widget(Paragraph::new(title), label);
     let browse_rect = Rect::new(label.right().saturating_sub(16), label.y, 16, 1);
-    button(frame, browse_rect, "Обзор…", form.focus == browse_field);
+    button(frame, browse_rect, "Обзор…", form.focus == browse_field, p);
     hits.push((browse_rect, browse_field));
 
     let focused = form.focus == text_field;
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(if focused { ACCENT } else { DIM }));
+        .border_style(Style::new().fg(if focused { p.accent } else { p.dim }));
     let text_area = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     let (visible, cursor) = input.visible(text_area.width as usize);
@@ -890,13 +917,13 @@ fn folder_field(
     hits.push((area, text_field));
 }
 
-fn selector(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool) {
+fn selector(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, p: &Palette) {
     let value_style = if focused {
-        Style::new().fg(Color::Black).bg(ACCENT).bold()
+        Style::new().fg(p.on_accent).bg(p.accent).bold()
     } else {
         Style::new().bold()
     };
-    let arrow_style = Style::new().fg(if focused { ACCENT } else { DIM });
+    let arrow_style = Style::new().fg(if focused { p.accent } else { p.dim });
     let line = Line::from(vec![
         Span::raw(format!("{label:22}")),
         Span::styled("◀ ", arrow_style),
