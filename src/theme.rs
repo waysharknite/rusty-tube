@@ -102,6 +102,37 @@ impl Theme {
                 control: c(250),
                 on_control: c(16),
             },
+            // Зелёный люминофор на чёрном. Ошибки и предупреждения остаются
+            // красными и жёлтыми, чтобы не теряться в зелёном.
+            Theme::Hacker => Palette {
+                base: Style::new().fg(c(40)).bg(c(16)),
+                text: c(46),
+                bar: c(233),
+                accent: c(46),
+                on_accent: c(16),
+                dim: c(28),
+                ok: c(120),
+                err: c(196),
+                warn: c(226),
+                info: c(48),
+                control: c(22),
+                on_control: c(46),
+            },
+            // Тёмно-зелёный текст на бледно-зелёном фоне.
+            Theme::HackerLight => Palette {
+                base: Style::new().fg(c(22)).bg(c(194)),
+                text: c(22),
+                bar: c(157),
+                accent: c(28),
+                on_accent: c(231),
+                dim: c(65),
+                ok: c(28),
+                err: c(160),
+                warn: c(130),
+                info: c(23),
+                control: c(151),
+                on_control: c(16),
+            },
         }
     }
 }

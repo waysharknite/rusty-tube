@@ -218,10 +218,21 @@ pub enum Theme {
     Contrast,
     Blue,
     Light,
+    /// Зелёный люминофор на чёрном, как в старых терминалах.
+    Hacker,
+    /// Тёмно-зелёный на бледно-зелёном — хакерская для светлого профиля.
+    HackerLight,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 4] = [Theme::Classic, Theme::Contrast, Theme::Blue, Theme::Light];
+    pub const ALL: [Theme; 6] = [
+        Theme::Classic,
+        Theme::Contrast,
+        Theme::Blue,
+        Theme::Light,
+        Theme::Hacker,
+        Theme::HackerLight,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -229,6 +240,8 @@ impl Theme {
             Theme::Contrast => "Контрастная",
             Theme::Blue => "Синяя",
             Theme::Light => "Светлая",
+            Theme::Hacker => "Хакерская",
+            Theme::HackerLight => "Хакерская светлая",
         }
     }
 
@@ -392,6 +405,17 @@ mod tests {
         let text = toml::to_string_pretty(&config).unwrap();
         assert!(text.contains("theme = \"light\""));
         assert_eq!(toml::from_str::<Config>(&text).unwrap().theme, Theme::Light);
+
+        let config = Config {
+            theme: Theme::HackerLight,
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("theme = \"hacker-light\""));
+        assert_eq!(
+            toml::from_str::<Config>(&text).unwrap().theme,
+            Theme::HackerLight
+        );
     }
 
     #[test]
