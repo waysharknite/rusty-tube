@@ -12,6 +12,7 @@ const APP_DIR: &str = "rusty-tube";
 pub enum Browser {
     #[default]
     Chrome,
+    Brave,
     Firefox,
     /// Только macOS.
     Safari,
@@ -24,6 +25,7 @@ impl Browser {
     pub const ALL: &[Browser] = if cfg!(target_os = "macos") {
         &[
             Browser::Chrome,
+            Browser::Brave,
             Browser::Firefox,
             Browser::Safari,
             Browser::Yandex,
@@ -32,6 +34,7 @@ impl Browser {
     } else {
         &[
             Browser::Chrome,
+            Browser::Brave,
             Browser::Firefox,
             Browser::Yandex,
             Browser::None,
@@ -41,6 +44,7 @@ impl Browser {
     pub fn label(self) -> &'static str {
         match self {
             Browser::Chrome => "Google Chrome",
+            Browser::Brave => "Brave",
             Browser::Firefox => "Mozilla Firefox",
             Browser::Safari => "Safari",
             Browser::Yandex => "Яндекс Браузер",
@@ -48,26 +52,29 @@ impl Browser {
         }
     }
 
-    /// Где лежит база cookie браузера (для подсказки в настройках).
+    /// Папка данных браузера (подсказка в настройках). Под подсказку в окне настроек
+    /// остаётся 50 символов, поэтому полный путь до файла cookie не пишем.
     #[cfg(windows)]
     pub fn location_hint(self) -> &'static str {
         match self {
-            Browser::Chrome => r"%LOCALAPPDATA%\Google\Chrome\User Data\Default\Network",
-            Browser::Firefox => r"%APPDATA%\Mozilla\Firefox\Profiles\<профиль>",
-            Browser::Yandex => r"%LOCALAPPDATA%\Yandex\YandexBrowser\User Data\Default\Network",
+            Browser::Chrome => r"%LOCALAPPDATA%\Google\Chrome\User Data",
+            Browser::Brave => r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser",
+            Browser::Firefox => r"%APPDATA%\Mozilla\Firefox\Profiles",
+            Browser::Yandex => r"%LOCALAPPDATA%\Yandex\YandexBrowser",
             Browser::Safari => "",
             Browser::None => "Загрузка без cookie",
         }
     }
 
-    /// Где лежит база cookie браузера (для подсказки в настройках).
+    /// Папка данных браузера (подсказка в настройках, не длиннее 50 символов).
     #[cfg(target_os = "macos")]
     pub fn location_hint(self) -> &'static str {
         match self {
-            Browser::Chrome => "~/Library/Application Support/Google/Chrome/Default",
-            Browser::Firefox => "~/Library/Application Support/Firefox/Profiles/<профиль>",
+            Browser::Chrome => "~/Library/Application Support/Google/Chrome",
+            Browser::Brave => "~/Library/Application Support/BraveSoftware",
+            Browser::Firefox => "~/Library/Application Support/Firefox",
             Browser::Safari => "Нужен «Полный доступ к диску» для Терминала",
-            Browser::Yandex => "~/Library/Application Support/Yandex/YandexBrowser/Default",
+            Browser::Yandex => "~/Library/Application Support/Yandex",
             Browser::None => "Загрузка без cookie",
         }
     }
@@ -77,6 +84,7 @@ impl Browser {
     pub fn location_hint(self) -> &'static str {
         match self {
             Browser::Chrome => "~/.config/google-chrome/Default",
+            Browser::Brave => "~/.config/BraveSoftware/Brave-Browser/Default",
             Browser::Firefox => "~/.mozilla/firefox/<профиль>",
             Browser::Yandex => "~/.config/yandex-browser/Default",
             Browser::Safari => "",
@@ -92,6 +100,7 @@ impl Browser {
     pub fn cookies_spec(self) -> Option<String> {
         match self {
             Browser::Chrome => Some("chrome".into()),
+            Browser::Brave => Some("brave".into()),
             Browser::Firefox => Some("firefox".into()),
             Browser::Safari => Some("safari".into()),
             Browser::Yandex => Some(format!("chrome:{}", yandex_profile()?.display())),
@@ -307,6 +316,31 @@ mod tests {
         assert!(!text.contains("proxy_port"));
         assert_eq!(toml::from_str::<Config>(&text).unwrap().proxy_port, None);
         assert_eq!(config.proxy_url(), None);
+    }
+
+    #[test]
+    fn brave_roundtrip() {
+        let config = Config {
+            browser: Browser::Brave,
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("browser = \"brave\""));
+        assert_eq!(
+            toml::from_str::<Config>(&text).unwrap().browser,
+            Browser::Brave
+        );
+        assert_eq!(Browser::Brave.cookies_spec().as_deref(), Some("brave"));
+        assert!(Browser::ALL.contains(&Browser::Brave));
+    }
+
+    #[test]
+    fn location_hints_fit_settings() {
+        // Окно настроек 78 колонок: рамка, поля и отступ 22 оставляют под подсказку 50.
+        for browser in Browser::ALL {
+            let hint = browser.location_hint();
+            assert!(hint.chars().count() <= 50, "{browser:?}: {hint}");
+        }
     }
 
     #[test]
