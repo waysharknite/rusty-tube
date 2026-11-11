@@ -219,6 +219,12 @@ SOCKS5-прокси и впишите его в настройки rusty-tube. �
 **На macOS: «Homebrew не найден», хотя он установлен.** Программа ищет Homebrew в обычных
 местах. Если он стоит в другом, задайте переменную окружения `HOMEBREW_PREFIX`.
 
+**На Windows вместо значков квадратики, у рамок прямые углы.** Так выглядит классическая
+консоль (окно PowerShell или cmd): её шрифты не знают многих символов, и программа
+переходит на упрощённый набор. Полный интерфейс — в [Windows Terminal](https://aka.ms/terminal),
+он стоит в Windows 11 по умолчанию. Набор можно задать вручную переменной окружения
+`RUSTY_TUBE_GLYPHS=unicode` или `RUSTY_TUBE_GLYPHS=legacy`.
+
 **Обновить инструменты вручную.** Windows: `scoop update yt-dlp ffmpeg deno`.
 macOS: `brew upgrade yt-dlp ffmpeg deno`.
 
@@ -294,6 +300,7 @@ cargo clippy --all-targets --target aarch64-apple-darwin
 | `src/app.rs`          | Состояние программы, сценарий запуска, обработка клавиш и мыши |
 | `src/ui.rs`           | Отрисовка интерфейса |
 | `src/theme.rs`        | Палитры цветовых тем (256 цветов, не базовые ANSI) |
+| `src/glyphs.rs`       | Значки и рамки; упрощённый набор для классической консоли Windows |
 | `src/input.rs`        | Однострочное поле ввода с курсором |
 | `src/download.rs`     | Запуск yt-dlp, выгрузка cookie, разбор прогресса |
 | `src/music.rs`        | Поиск в YouTube Music |

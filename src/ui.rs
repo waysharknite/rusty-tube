@@ -5,18 +5,17 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap},
 };
 
 use crate::{
     app::{App, Confirm, DownloadView, Focus, Modal, Mode, SearchView, SettingsForm, Stage, field},
     config::{AudioFormat, Browser, Theme},
     download::Kind,
+    glyphs::glyphs,
     input::Input,
     theme::Palette,
 };
-
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hits = Default::default();
@@ -55,13 +54,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn spinner(app: &App) -> &'static str {
-    SPINNER[app.tick % SPINNER.len()]
+    spinner_frame(app.tick)
+}
+
+fn spinner_frame(tick: usize) -> &'static str {
+    let frames = glyphs().spinner;
+    frames[tick % frames.len()]
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     frame.render_widget(Block::new().style(Style::new().fg(p.text).bg(p.bar)), area);
     let title = Line::from(vec![
-        Span::styled(" ▶ ", Style::new().fg(p.accent).bold()),
+        Span::styled(
+            format!(" {} ", glyphs().play),
+            Style::new().fg(p.accent).bold(),
+        ),
         Span::styled("rusty-tube", Style::new().bold()),
     ]);
     frame.render_widget(Paragraph::new(title), area);
@@ -159,7 +166,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, p: &Palette) {
     // Ошибка cookie не мешает работе — показываем её тихо, справа, поверх хвоста строки.
     if let Some(warning) = &app.cookie_warning {
         let max = (area.width / 2).saturating_sub(2) as usize;
-        let text = format!(" ⚠ {} ", truncate(warning, max));
+        let text = format!(" {} {} ", glyphs().warn, truncate(warning, max));
         let width = text_width(&text).min(area.width);
         let rect = Rect::new(area.right() - width, area.y, width, 1);
         frame.render_widget(
@@ -198,7 +205,7 @@ fn text_width(text: &str) -> u16 {
 fn panel(title: &str, color: Color) -> Block<'_> {
     Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(glyphs().border)
         .border_style(Style::new().fg(color))
         .title(Line::from(format!(" {title} ")).bold())
 }
@@ -337,7 +344,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let focused = app.focus == Focus::Input && app.modal.is_none();
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(glyphs().border)
         .border_style(Style::new().fg(if focused { p.accent } else { p.dim }));
     let inner = block.inner(input);
     frame.render_widget(block, input);
@@ -417,7 +424,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 search,
                 results_area,
                 focused,
-                searching.then(|| SPINNER[tick % SPINNER.len()]),
+                searching.then(|| spinner_frame(tick)),
                 p,
             );
             app.hits.results = list;
@@ -428,7 +435,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     if panel_height > 0 {
         let tick = app.tick;
         if let Some(view) = app.download.as_ref() {
-            let open = draw_download(frame, view, panel_area, SPINNER[tick % SPINNER.len()], p);
+            let open = draw_download(frame, view, panel_area, spinner_frame(tick), p);
             app.hits.open_folder = open;
         }
     }
@@ -538,7 +545,11 @@ fn draw_options_header(
     focused: bool,
     p: &Palette,
 ) -> Rect {
-    let arrow = if app.options_open { "▾" } else { "▸" };
+    let arrow = if app.options_open {
+        glyphs().expanded
+    } else {
+        glyphs().collapsed
+    };
     let title = format!(" {arrow} Параметры загрузки ");
     let rect = Rect::new(line.x, line.y, text_width(&title), 1).intersection(line);
     let style = if focused {
@@ -613,9 +624,9 @@ fn option_selector(
     };
     let arrow_style = Style::new().fg(if focused { p.accent } else { p.dim });
     let line = Line::from(vec![
-        Span::styled("◀ ", arrow_style),
+        Span::styled(format!("{} ", glyphs().back), arrow_style),
         Span::styled(format!(" {value:^18} "), value_style),
-        Span::styled(" ▶", arrow_style),
+        Span::styled(format!(" {}", glyphs().play), arrow_style),
     ]);
     let rect = Rect::new(area.x, area.y, 24, 1).intersection(area);
     frame.render_widget(Paragraph::new(line), rect);
@@ -760,7 +771,11 @@ fn draw_results(
             truncate(&format!("{artist} — {name}"), left_width)
         };
         let pad = width.saturating_sub(left.chars().count() + right.chars().count() + 2);
-        let marker = if selected { "▶ " } else { "  " };
+        let marker = if selected {
+            format!("{} ", glyphs().play)
+        } else {
+            "  ".into()
+        };
         let base = if selected && focused {
             Style::new().fg(p.on_accent).bg(p.accent)
         } else if selected {
@@ -849,11 +864,11 @@ fn draw_download(
         .rev()
         .map(|step| {
             let (mark, style) = if step.done {
-                ("✓", Style::new().fg(p.ok))
+                (glyphs().ok, Style::new().fg(p.ok))
             } else if running {
                 (spin, Style::new().fg(p.accent).bold())
             } else if failed {
-                ("✗", Style::new().fg(p.err))
+                (glyphs().fail, Style::new().fg(p.err))
             } else {
                 ("•", Style::new())
             };
@@ -884,7 +899,7 @@ fn draw_download(
                 label,
                 Style::new().fg(p.text).add_modifier(Modifier::BOLD),
             ))
-            .use_unicode(true),
+            .use_unicode(glyphs().fine_gauge),
         gauge,
     );
     let detail_text = if running && !view.progress.detail.is_empty() {
@@ -918,7 +933,7 @@ fn draw_download(
                 .gauge_style(Style::new().fg(p.info).bg(p.bar))
                 .ratio(ratio.clamp(0.0, 1.0))
                 .label(format!("{done}/{total}"))
-                .use_unicode(true),
+                .use_unicode(glyphs().fine_gauge),
             bar,
         );
     }
@@ -1186,9 +1201,9 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
 
     // Глобальная установка: подпись, состояние и кнопка справа.
     let (status, status_color) = if form.installed {
-        ("установлено ✓", p.ok)
+        (format!("установлено {}", glyphs().ok), p.ok)
     } else {
-        ("не установлено", p.dim)
+        ("не установлено".into(), p.dim)
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1263,7 +1278,7 @@ fn folder_field(
     let focused = form.focus == text_field;
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(glyphs().border)
         .border_style(Style::new().fg(if focused { p.accent } else { p.dim }));
     let text_area = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
@@ -1288,9 +1303,9 @@ fn selector(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bo
     let arrow_style = Style::new().fg(if focused { p.accent } else { p.dim });
     let line = Line::from(vec![
         Span::raw(format!("{label:22}")),
-        Span::styled("◀ ", arrow_style),
+        Span::styled(format!("{} ", glyphs().back), arrow_style),
         Span::styled(format!(" {value:^18} "), value_style),
-        Span::styled(" ▶", arrow_style),
+        Span::styled(format!(" {}", glyphs().play), arrow_style),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }

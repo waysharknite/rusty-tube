@@ -4,6 +4,7 @@
 mod app;
 mod config;
 mod download;
+mod glyphs;
 mod input;
 mod install;
 mod music;
