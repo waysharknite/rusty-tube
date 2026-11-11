@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::{
     app::{App, Confirm, DownloadView, Focus, Modal, Mode, SearchView, SettingsForm, Stage, field},
-    config::{AudioFormat, Browser, Quality, Theme},
+    config::{AudioFormat, Browser, Theme},
     download::Kind,
     input::Input,
     theme::Palette,
@@ -122,15 +122,16 @@ fn draw_top_bar(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, p: &Palette) {
     let sep = Span::styled("  │  ", Style::new().fg(p.dim));
     let (format_label, format, dir) = match app.mode {
+        Mode::Video if app.to_mp3 => (" Формат: ", "MP3", app.config.mp3_folder()),
         Mode::Video => (
             " Качество: ",
             app.config.quality.label(),
-            &app.config.download_dir,
+            app.config.download_dir.as_path(),
         ),
         Mode::Music => (
             " Формат: ",
             app.config.audio_format.label(),
-            &app.config.music_dir,
+            app.config.music_dir.as_path(),
         ),
     };
     let line = Line::from(vec![
@@ -154,6 +155,18 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, p: &Palette) {
         Paragraph::new(line).style(Style::new().fg(p.text).bg(p.bar)),
         area,
     );
+
+    // Ошибка cookie не мешает работе — показываем её тихо, справа, поверх хвоста строки.
+    if let Some(warning) = &app.cookie_warning {
+        let max = (area.width / 2).saturating_sub(2) as usize;
+        let text = format!(" ⚠ {} ", truncate(warning, max));
+        let width = text_width(&text).min(area.width);
+        let rect = Rect::new(area.right() - width, area.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(text).style(Style::new().fg(p.warn).bg(p.bar)),
+            rect,
+        );
+    }
 }
 
 /// Центральная колонка фиксированной максимальной ширины.
@@ -258,11 +271,14 @@ fn draw_fatal(frame: &mut Frame, message: &str, area: Rect, p: &Palette) {
 fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let col = column(area, 96);
     let has_search = app.mode == Mode::Music && app.search.is_some();
+    // Режим видео: блок «Параметры загрузки» (заголовок и, если раскрыт, строки).
+    let options_height = app.option_rows().len() as u16;
+    let extra = options_height;
     let panel_height = match (app.download.is_some(), has_search) {
         (false, _) => 0,
         // Рядом со списком результатов панель загрузки поменьше.
         (true, true) => 11.min(col.height.saturating_sub(14)),
-        (true, false) => 16.min(col.height.saturating_sub(7)),
+        (true, false) => 16.min(col.height.saturating_sub(7 + extra)),
     };
     // Со списком результатов всё прижимается к верху, иначе — по центру.
     let (top, results_height, bottom) = if has_search {
@@ -278,10 +294,22 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             Constraint::Fill(1),
         )
     };
-    let [_, label, input, hint, _, results_area, _, panel_area, _] = Layout::vertical([
+    let [
+        _,
+        label,
+        input,
+        options,
+        hint,
+        _,
+        results_area,
+        _,
+        panel_area,
+        _,
+    ] = Layout::vertical([
         top,
         Constraint::Length(1),
         Constraint::Length(3),
+        Constraint::Length(options_height),
         Constraint::Length(1),
         Constraint::Length(1),
         results_height,
@@ -330,8 +358,36 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
         frame.set_cursor_position((text_area.x, text_area.y));
     }
 
+    if options_height > 0 {
+        draw_video_options(frame, app, options, p);
+    }
+
+    let on_header = app.focus == Focus::Options;
+    let on_toggle = matches!(app.focus, Focus::Mp3 | Focus::Subtitles);
+    let on_selector = matches!(app.focus, Focus::Quality | Focus::Range);
+    let on_range = matches!(app.focus, Focus::From | Focus::To);
     let hint_line = match &app.notice {
         Some(notice) => Line::styled(notice.as_str(), Style::new().fg(p.warn)),
+        None if on_header && app.options_open => Line::styled(
+            "Enter или ← — свернуть · ↓ — к параметрам",
+            Style::new().fg(p.dim),
+        ),
+        None if on_header => Line::styled(
+            "Enter или → — раскрыть параметры · ↑ — к ссылке",
+            Style::new().fg(p.dim),
+        ),
+        None if on_toggle => Line::styled(
+            "Пробел — вкл/выкл · ↑↓ — параметр · Enter — скачать",
+            Style::new().fg(p.dim),
+        ),
+        None if on_selector => Line::styled(
+            "←→ — значение · ↑↓ — параметр · Enter — скачать",
+            Style::new().fg(p.dim),
+        ),
+        None if on_range => Line::styled(
+            "Время: 2:03, 1:02:03 или 95 · пусто «от» — с начала, «до» — до конца",
+            Style::new().fg(p.dim),
+        ),
         None if app.downloading() => {
             Line::styled("Esc — прервать загрузку", Style::new().fg(p.dim))
         }
@@ -345,7 +401,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             Style::new().fg(p.dim),
         ),
         None => Line::styled(
-            "Enter — скачать · Esc — очистить · F3 — музыка",
+            "Enter — скачать · ↓ — параметры · Esc — очистить · F3 — музыка",
             Style::new().fg(p.dim),
         ),
     };
@@ -376,6 +432,268 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             app.hits.open_folder = open;
         }
     }
+}
+
+/// Ширина колонки подписей в блоке параметров.
+const OPTION_LABEL: u16 = 22;
+
+/// Раскрывающийся блок «Параметры загрузки»: качество, MP3, участок и субтитры.
+fn draw_video_options(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
+    let active = app.modal.is_none();
+    let rows = app.option_rows();
+    for (i, row) in rows.iter().enumerate() {
+        let line = Rect::new(area.x, area.y + i as u16, area.width, 1).intersection(area);
+        if line.is_empty() {
+            break;
+        }
+        let first = row[0];
+        let enabled = app.control_enabled(first);
+        let focused = |control: Focus| active && app.focus == control;
+        // Подпись слева с отступом; у заголовка — своя отрисовка.
+        let label = match first {
+            Focus::Quality => "Качество видео",
+            Focus::Mp3 => "Конвертация в MP3",
+            Focus::Range => "Скачать",
+            Focus::Subtitles => "Субтитры",
+            _ => "",
+        };
+        if !label.is_empty() {
+            let style = if enabled {
+                Style::new()
+            } else {
+                Style::new().fg(p.dim)
+            };
+            frame.render_widget(
+                Paragraph::new(format!("   {label}")).style(style),
+                Rect::new(line.x, line.y, OPTION_LABEL + 3, 1).intersection(line),
+            );
+        }
+        let value_x = line.x + 3 + OPTION_LABEL;
+        let value_area =
+            Rect::new(value_x, line.y, line.right().saturating_sub(value_x), 1).intersection(line);
+        let rect = match first {
+            Focus::Options => {
+                let rect = draw_options_header(frame, app, line, focused(Focus::Options), p);
+                Some(rect)
+            }
+            Focus::Quality => Some(option_selector(
+                frame,
+                value_area,
+                app.config.quality.label(),
+                focused(Focus::Quality),
+                enabled,
+                p,
+            )),
+            Focus::Range => Some(option_selector(
+                frame,
+                value_area,
+                if app.full_video {
+                    "Полностью"
+                } else {
+                    "Только участок"
+                },
+                focused(Focus::Range),
+                true,
+                p,
+            )),
+            Focus::Mp3 => Some(option_checkbox(
+                frame,
+                value_area,
+                app.to_mp3,
+                "только звук, перекодированный в MP3",
+                focused(Focus::Mp3),
+                true,
+                p,
+            )),
+            Focus::Subtitles => Some(option_checkbox(
+                frame,
+                value_area,
+                app.subtitles && enabled,
+                if enabled {
+                    "встроить в видео русские (или английские), если есть"
+                } else {
+                    "недоступно при конвертации в MP3"
+                },
+                focused(Focus::Subtitles),
+                enabled,
+                p,
+            )),
+            Focus::From => {
+                draw_range_fields(frame, app, value_area, p);
+                None
+            }
+            _ => None,
+        };
+        if let Some(rect) = rect {
+            app.hits.controls.push((rect, first));
+        }
+    }
+}
+
+/// Заголовок блока: стрелка, название и (в свёрнутом виде) краткая сводка.
+fn draw_options_header(
+    frame: &mut Frame,
+    app: &App,
+    line: Rect,
+    focused: bool,
+    p: &Palette,
+) -> Rect {
+    let arrow = if app.options_open { "▾" } else { "▸" };
+    let title = format!(" {arrow} Параметры загрузки ");
+    let rect = Rect::new(line.x, line.y, text_width(&title), 1).intersection(line);
+    let style = if focused {
+        Style::new().fg(p.on_accent).bg(p.accent).bold()
+    } else {
+        Style::new().fg(p.accent).bold()
+    };
+    frame.render_widget(Paragraph::new(title).style(style), rect);
+    if !app.options_open {
+        let summary = format!("  {}", options_summary(app));
+        let rest = Rect::new(
+            rect.right(),
+            line.y,
+            line.right().saturating_sub(rect.right()),
+            1,
+        )
+        .intersection(line);
+        frame.render_widget(
+            Paragraph::new(truncate(&summary, rest.width as usize)).fg(p.dim),
+            rest,
+        );
+    }
+    rect
+}
+
+/// «До 1080p · участок 2:03–3:03 · субтитры» — что сейчас выбрано.
+fn options_summary(app: &App) -> String {
+    let mut parts = vec![if app.to_mp3 {
+        "MP3".to_string()
+    } else {
+        app.config.quality.label().to_string()
+    }];
+    parts.push(if app.full_video {
+        "полностью".to_string()
+    } else {
+        let from = app.range_from.value().trim();
+        let to = app.range_to.value().trim();
+        match (from.is_empty(), to.is_empty()) {
+            (true, true) => "участок".to_string(),
+            _ => format!(
+                "участок {}–{}",
+                if from.is_empty() {
+                    "начало"
+                } else {
+                    from
+                },
+                if to.is_empty() { "конец" } else { to }
+            ),
+        }
+    });
+    if app.subtitles && !app.to_mp3 {
+        parts.push("субтитры".to_string());
+    }
+    parts.join(" · ")
+}
+
+/// Значение со стрелками «◀ значение ▶»; возвращает область для клика.
+fn option_selector(
+    frame: &mut Frame,
+    area: Rect,
+    value: &str,
+    focused: bool,
+    enabled: bool,
+    p: &Palette,
+) -> Rect {
+    let value_style = if !enabled {
+        Style::new().fg(p.dim)
+    } else if focused {
+        Style::new().fg(p.on_accent).bg(p.accent).bold()
+    } else {
+        Style::new().bold()
+    };
+    let arrow_style = Style::new().fg(if focused { p.accent } else { p.dim });
+    let line = Line::from(vec![
+        Span::styled("◀ ", arrow_style),
+        Span::styled(format!(" {value:^18} "), value_style),
+        Span::styled(" ▶", arrow_style),
+    ]);
+    let rect = Rect::new(area.x, area.y, 24, 1).intersection(area);
+    frame.render_widget(Paragraph::new(line), rect);
+    rect
+}
+
+/// Галочка с пояснением справа; возвращает область для клика (галочка и текст).
+fn option_checkbox(
+    frame: &mut Frame,
+    area: Rect,
+    checked: bool,
+    note: &str,
+    focused: bool,
+    enabled: bool,
+    p: &Palette,
+) -> Rect {
+    let mark = format!("[{}]", if checked { "x" } else { " " });
+    let mark_style = if !enabled {
+        Style::new().fg(p.dim)
+    } else if focused {
+        Style::new().fg(p.on_accent).bg(p.accent).bold()
+    } else if checked {
+        Style::new().fg(p.text).bold()
+    } else {
+        Style::new().fg(p.text)
+    };
+    let line = Line::from(vec![
+        Span::styled(mark.clone(), mark_style),
+        Span::styled(format!("  {note}"), Style::new().fg(p.dim)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+    Rect::new(area.x, area.y, text_width(&mark) + 2 + text_width(note), 1).intersection(area)
+}
+
+/// Поля «от» и «до» участка.
+fn draw_range_fields(frame: &mut Frame, app: &mut App, range: Rect, p: &Palette) {
+    let active = app.modal.is_none();
+    let mut x = range.x;
+    for (control, label) in [(Focus::From, "от "), (Focus::To, "  до ")] {
+        let label_rect = Rect::new(x, range.y, text_width(label), 1).intersection(range);
+        frame.render_widget(Paragraph::new(label), label_rect);
+        let field_rect = Rect::new(label_rect.right() + 1, range.y, 14, 1).intersection(range);
+        let focused = active && app.focus == control;
+        let style = if focused {
+            Style::new().fg(p.on_accent).bg(p.accent)
+        } else {
+            Style::new().fg(p.on_control).bg(p.control)
+        };
+        frame.render_widget(Paragraph::new("").style(style), field_rect);
+        let text_area = field_rect.inner(ratatui::layout::Margin::new(1, 0));
+        let input = if control == Focus::From {
+            &app.range_from
+        } else {
+            &app.range_to
+        };
+        if input.is_empty() && !focused {
+            let placeholder = if control == Focus::From {
+                "начало"
+            } else {
+                "конец"
+            };
+            frame.render_widget(
+                Paragraph::new(placeholder).style(style.fg(p.dim)),
+                text_area,
+            );
+        } else {
+            let (visible, cursor) = input.visible(text_area.width as usize);
+            frame.render_widget(Paragraph::new(visible).style(style), text_area);
+            if focused {
+                frame.set_cursor_position((text_area.x + cursor as u16, text_area.y));
+            }
+        }
+        app.hits.controls.push((field_rect, control));
+        x = field_rect.right() + 1;
+    }
+    let example =
+        Rect::new(x + 2, range.y, range.right().saturating_sub(x + 2), 1).intersection(range);
+    frame.render_widget(Paragraph::new("например 2:03 — 3:03").fg(p.dim), example);
 }
 
 /// Список найденных треков. Возвращает область списка и строки для кликов.
@@ -498,6 +816,7 @@ fn draw_download(
     let (title, color) = match &view.result {
         None if view.playlist => ("Загрузка плейлиста", p.accent),
         None if view.kind == Kind::Audio => ("Загрузка трека", p.accent),
+        None if view.kind == Kind::Mp3 => ("Загрузка MP3", p.accent),
         None => ("Загрузка", p.accent),
         Some(Ok(_)) => ("Готово", p.ok),
         Some(Err(_)) => ("Ошибка", p.err),
@@ -635,7 +954,7 @@ fn draw_download(
                 Line::styled(
                     summary.errors.last().map_or(
                         match view.kind {
-                            Kind::Video => "Можно вставить следующую ссылку",
+                            Kind::Video | Kind::Mp3 => "Можно вставить следующую ссылку",
                             Kind::Audio => "Можно выбрать следующий трек",
                         },
                         String::as_str,
@@ -703,7 +1022,7 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm, p: &Palette
 }
 
 fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Palette) {
-    let rect = centered(frame.area(), 78, 28);
+    let rect = centered(frame.area(), 78, 31);
     frame.render_widget(Clear, rect);
     frame.render_widget(Block::new().style(p.base), rect);
     let title = if form.first_run {
@@ -716,7 +1035,6 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
     frame.render_widget(block, rect);
 
     let [
-        quality,
         audio,
         theme,
         _,
@@ -730,43 +1048,40 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
         folder,
         music_label,
         music_folder,
+        mp3_label,
+        mp3_folder,
+        _,
+        global,
         error,
         buttons,
         _,
         help,
     ] = Layout::vertical([
+        Constraint::Length(1), // audio
+        Constraint::Length(1), // theme
         Constraint::Length(1),
+        Constraint::Length(1), // browser
+        Constraint::Length(1), // browser_hint
         Constraint::Length(1),
+        Constraint::Length(1), // proxy
+        Constraint::Length(1), // proxy_hint
         Constraint::Length(1),
+        Constraint::Length(1), // folder_label
+        Constraint::Length(3), // folder
+        Constraint::Length(1), // music_label
+        Constraint::Length(3), // music_folder
+        Constraint::Length(1), // mp3_label
+        Constraint::Length(3), // mp3_folder
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(3),
-        Constraint::Length(1),
-        Constraint::Length(3),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(1), // global
+        Constraint::Length(1), // error
+        Constraint::Length(1), // buttons
         Constraint::Fill(1),
-        Constraint::Length(1),
+        Constraint::Length(1), // help
     ])
     .areas(inner);
 
     let mut hits = Vec::new();
-
-    selector(
-        frame,
-        quality,
-        "Качество видео",
-        Quality::ALL[form.quality].label(),
-        form.focus == field::QUALITY,
-        p,
-    );
-    hits.push((quality, field::QUALITY));
 
     selector(
         frame,
@@ -842,7 +1157,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
         form,
         &mut hits,
         (folder_label, folder),
-        ("Папка для видео", &form.folder),
+        ("Папка для видео", &form.folder, ""),
         (field::FOLDER, field::BROWSE),
         p,
     );
@@ -851,13 +1166,56 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
         form,
         &mut hits,
         (music_label, music_folder),
-        ("Папка для музыки", &form.music_folder),
+        ("Папка для музыки", &form.music_folder, ""),
         (field::MUSIC_FOLDER, field::MUSIC_BROWSE),
         p,
     );
+    folder_field(
+        frame,
+        form,
+        &mut hits,
+        (mp3_label, mp3_folder),
+        (
+            "Путь для сохранения MP3",
+            &form.mp3_folder,
+            "пусто — в папку для видео",
+        ),
+        (field::MP3_FOLDER, field::MP3_BROWSE),
+        p,
+    );
+
+    // Глобальная установка: подпись, состояние и кнопка справа.
+    let (status, status_color) = if form.installed {
+        ("установлено ✓", p.ok)
+    } else {
+        ("не установлено", p.dim)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(format!("{:22}", "Запуск из любой папки")),
+            Span::styled(status, Style::new().fg(status_color)),
+        ])),
+        global,
+    );
+    let install_label = if form.installed {
+        "Переустановить"
+    } else {
+        "Установить"
+    };
+    let install_rect = Rect::new(global.right().saturating_sub(18), global.y, 18, 1);
+    button(
+        frame,
+        install_rect,
+        install_label,
+        form.focus == field::GLOBAL,
+        p,
+    );
+    hits.push((install_rect, field::GLOBAL));
 
     if let Some(err) = &form.error {
         frame.render_widget(Paragraph::new(err.as_str()).fg(p.err), error);
+    } else if let Some(info) = &form.info {
+        frame.render_widget(Paragraph::new(info.as_str()).fg(p.ok), error);
     }
 
     let save_w = 14;
@@ -893,7 +1251,7 @@ fn folder_field(
     form: &SettingsForm,
     hits: &mut Vec<(Rect, usize)>,
     (label, area): (Rect, Rect),
-    (title, input): (&str, &Input),
+    (title, input, placeholder): (&str, &Input, &str),
     (text_field, browse_field): (usize, usize),
     p: &Palette,
 ) {
@@ -910,7 +1268,11 @@ fn folder_field(
     let text_area = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     let (visible, cursor) = input.visible(text_area.width as usize);
-    frame.render_widget(Paragraph::new(visible), text_area);
+    if input.is_empty() {
+        frame.render_widget(Paragraph::new(placeholder).fg(p.dim), text_area);
+    } else {
+        frame.render_widget(Paragraph::new(visible), text_area);
+    }
     if focused {
         frame.set_cursor_position((text_area.x + cursor as u16, text_area.y));
     }

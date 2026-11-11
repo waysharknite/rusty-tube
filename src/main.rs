@@ -5,8 +5,13 @@ mod app;
 mod config;
 mod download;
 mod input;
+mod install;
 mod music;
+mod release;
+mod socks_bridge;
+mod subtitles;
 mod theme;
+mod timecode;
 mod ui;
 mod worker;
 

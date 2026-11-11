@@ -1,7 +1,11 @@
 //! Состояние приложения, сценарий запуска и обработка ввода.
 
 use std::{
-    collections::VecDeque, fs, path::PathBuf, process::Command, sync::mpsc::TryRecvError,
+    collections::VecDeque,
+    fs,
+    path::PathBuf,
+    process::Command,
+    sync::mpsc::{Receiver, TryRecvError},
     time::Duration,
 };
 
@@ -19,8 +23,11 @@ use crate::{
     config::{self, AudioFormat, Browser, Config, Quality, Theme},
     download::{self, DownloadSummary, Kind},
     input::{Input, clipboard_text},
+    install,
     music::{self, Track},
     packages::{self, AppUpdate, Packages},
+    release::{self, Release},
+    timecode::{self, Bound, Section},
     ui,
     worker::{CANCELLED, Ctx, Event, Outcome, Progress, Worker},
 };
@@ -62,6 +69,19 @@ pub struct StartupView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Input,
+    /// Заголовок раскрывающегося блока «Параметры загрузки» (режим видео).
+    Options,
+    /// Выбор качества видео.
+    Quality,
+    /// Галочка «Конвертация в MP3».
+    Mp3,
+    /// Выбор «Полностью» / «Участок».
+    Range,
+    /// Поля промежутка «от» и «до» (видны, когда качается участок).
+    From,
+    To,
+    /// Галочка «Субтитры».
+    Subtitles,
     /// Список результатов поиска музыки.
     Results,
     Settings,
@@ -75,8 +95,15 @@ enum Action {
     Quit,
     CancelDownload,
     CancelAndQuit,
-    /// Начать загрузку: ссылка, «весь плейлист или только видео» и что качать.
-    Download(String, bool, Kind),
+    /// Начать загрузку: ссылка, «весь плейлист или только видео», что качать, участок
+    /// и вжигать ли субтитры.
+    Download(String, bool, Kind, Option<Section>, bool),
+    /// Глобальная установка (кнопка в настройках).
+    InstallGlobal,
+    /// Открыть страницу релиза новой версии.
+    OpenRelease(String),
+    /// Не напоминать об этой версии программы.
+    SkipVersion(String),
     Nothing,
 }
 
@@ -93,21 +120,22 @@ pub struct Confirm {
 }
 
 pub mod field {
-    pub const QUALITY: usize = 0;
-    pub const AUDIO: usize = 1;
-    pub const THEME: usize = 2;
-    pub const BROWSER: usize = 3;
-    pub const PROXY: usize = 4;
-    pub const FOLDER: usize = 5;
-    pub const BROWSE: usize = 6;
-    pub const MUSIC_FOLDER: usize = 7;
-    pub const MUSIC_BROWSE: usize = 8;
-    pub const SAVE: usize = 9;
-    pub const CANCEL: usize = 10;
+    pub const AUDIO: usize = 0;
+    pub const THEME: usize = 1;
+    pub const BROWSER: usize = 2;
+    pub const PROXY: usize = 3;
+    pub const FOLDER: usize = 4;
+    pub const BROWSE: usize = 5;
+    pub const MUSIC_FOLDER: usize = 6;
+    pub const MUSIC_BROWSE: usize = 7;
+    pub const MP3_FOLDER: usize = 8;
+    pub const MP3_BROWSE: usize = 9;
+    pub const GLOBAL: usize = 10;
+    pub const SAVE: usize = 11;
+    pub const CANCEL: usize = 12;
 }
 
 pub struct SettingsForm {
-    pub quality: usize,
     pub audio: usize,
     /// Пока окно открыто, интерфейс рисуется выбранной здесь темой (предпросмотр).
     pub theme: usize,
@@ -116,10 +144,16 @@ pub struct SettingsForm {
     pub proxy: Input,
     pub folder: Input,
     pub music_folder: Input,
+    /// Пусто — MP3 сохраняются в папку видео.
+    pub mp3_folder: Input,
     pub focus: usize,
     /// Первичная настройка: отменить нельзя, только сохранить.
     pub first_run: bool,
     pub error: Option<String>,
+    /// Сообщение об успехе (показывается на месте ошибки).
+    pub info: Option<String>,
+    /// Программа уже установлена для запуска из любой папки.
+    pub installed: bool,
 }
 
 impl SettingsForm {
@@ -134,15 +168,12 @@ impl SettingsForm {
     fn is_text_field(&self) -> bool {
         matches!(
             self.focus,
-            field::PROXY | field::FOLDER | field::MUSIC_FOLDER
+            field::PROXY | field::FOLDER | field::MUSIC_FOLDER | field::MP3_FOLDER
         )
     }
 
     fn is_selector(&self) -> bool {
-        matches!(
-            self.focus,
-            field::QUALITY | field::AUDIO | field::THEME | field::BROWSER
-        )
+        matches!(self.focus, field::AUDIO | field::THEME | field::BROWSER)
     }
 
     /// Вставка текста в поле под фокусом; в поле порта попадают только цифры.
@@ -154,6 +185,7 @@ impl SettingsForm {
             }
             field::FOLDER => self.folder.insert_str(text.trim()),
             field::MUSIC_FOLDER => self.music_folder.insert_str(text.trim()),
+            field::MP3_FOLDER => self.mp3_folder.insert_str(text.trim()),
             _ => {}
         }
     }
@@ -229,6 +261,8 @@ pub struct Hits {
     pub exit: Rect,
     pub input: Rect,
     pub open_folder: Rect,
+    /// Элементы блока «Параметры загрузки».
+    pub controls: Vec<(Rect, Focus)>,
     /// Вкладки режимов «Видео» и «Музыка».
     pub modes: Vec<(Rect, Mode)>,
     /// Область списка результатов и строки с индексами треков.
@@ -250,22 +284,40 @@ pub struct App {
     pub input: Input,
     /// Поле поиска (режим музыки).
     pub query: Input,
+    /// Блок «Параметры загрузки» раскрыт.
+    pub options_open: bool,
+    /// Режим видео: качать целиком или только участок `range_from`..`range_to`.
+    pub full_video: bool,
+    /// Режим видео: вжечь в видео русские (или английские) субтитры.
+    pub subtitles: bool,
+    /// Режим видео: качать только звук и перекодировать в MP3.
+    pub to_mp3: bool,
+    pub range_from: Input,
+    pub range_to: Input,
     pub focus: Focus,
     pub download: Option<DownloadView>,
     pub search: Option<SearchView>,
     pub notice: Option<String>,
+    /// Cookie не удалось обновить — показывается справа в строке состояния.
+    pub cookie_warning: Option<String>,
     pub hits: Hits,
     pub tick: usize,
     worker: Option<(Job, Worker)>,
     updates_checked: bool,
     /// Cookie уже экспортированы из браузера в этом запуске (или это не требуется).
     cookies_refreshed: bool,
+    /// Окно настроек, спрятанное на время вопроса из него; возвращается после ответа.
+    stashed_settings: Option<SettingsForm>,
+    /// Фоновая проверка новой версии на GitHub; `None` — уже показали или нечего.
+    release: Option<Receiver<Release>>,
     quit: bool,
 }
 
 impl App {
     pub fn new() -> App {
         let loaded = Config::load();
+        let release =
+            release::check_in_background(loaded.as_ref().and_then(|c| c.skipped_version.clone()));
         App {
             packages: Packages::locate(),
             first_run: loaded.is_none(),
@@ -276,15 +328,24 @@ impl App {
             mode: Mode::Video,
             input: Input::default(),
             query: Input::default(),
+            options_open: false,
+            full_video: true,
+            subtitles: false,
+            to_mp3: false,
+            range_from: Input::default(),
+            range_to: Input::default(),
             focus: Focus::Input,
             download: None,
             search: None,
             notice: None,
+            cookie_warning: None,
             hits: Hits::default(),
             tick: 0,
             worker: None,
             updates_checked: false,
             cookies_refreshed: false,
+            stashed_settings: None,
+            release: Some(release),
             quit: false,
         }
     }
@@ -306,6 +367,7 @@ impl App {
                 }
             }
             self.pump_worker();
+            self.pump_release();
             self.tick = self.tick.wrapping_add(1);
         }
         if let Some((_, worker)) = self.worker.take() {
@@ -346,6 +408,42 @@ impl App {
 
     pub fn has_results(&self) -> bool {
         self.mode == Mode::Music && self.search.as_ref().is_some_and(|s| !s.results.is_empty())
+    }
+
+    /// Строки блока «Параметры загрузки» сверху вниз (только режим видео),
+    /// включая недоступные сейчас элементы.
+    pub fn option_rows(&self) -> Vec<Vec<Focus>> {
+        if self.mode != Mode::Video {
+            return Vec::new();
+        }
+        let mut rows = vec![vec![Focus::Options]];
+        if self.options_open {
+            rows.extend([vec![Focus::Quality], vec![Focus::Mp3], vec![Focus::Range]]);
+            if !self.full_video {
+                rows.push(vec![Focus::From, Focus::To]);
+            }
+            rows.push(vec![Focus::Subtitles]);
+        }
+        rows
+    }
+
+    /// Качество и субтитры — только для видео, при конвертации в MP3 они не нужны.
+    pub fn control_enabled(&self, control: Focus) -> bool {
+        !(self.to_mp3 && matches!(control, Focus::Quality | Focus::Subtitles))
+    }
+
+    /// Доступные элементы под полем ссылки в порядке обхода.
+    pub fn video_controls(&self) -> Vec<Focus> {
+        self.option_rows()
+            .into_iter()
+            .flatten()
+            .filter(|c| self.control_enabled(*c))
+            .collect()
+    }
+
+    /// Что качается в режиме видео при текущих галочках.
+    pub fn video_kind(&self) -> Kind {
+        if self.to_mp3 { Kind::Mp3 } else { Kind::Video }
     }
 
     // ---------------------------------------------------------------- запуск
@@ -522,7 +620,7 @@ impl App {
                     Event::Item { index, total } => {
                         view.item = Some((index, total));
                         let what = match view.kind {
-                            Kind::Video => "Видео",
+                            Kind::Video | Kind::Mp3 => "Видео",
                             Kind::Audio => "Трек",
                         };
                         view.set_step(format!("{what} {index} из {total}"));
@@ -595,7 +693,9 @@ impl App {
                     } else {
                         "загрузка будет без cookie"
                     };
-                    self.notice = Some(format!("Cookie не обновлены ({fallback}): {e}"));
+                    self.cookie_warning = Some(format!("Cookie не обновлены ({fallback}): {e}"));
+                } else {
+                    self.cookie_warning = None;
                 }
                 self.advance_startup();
             }
@@ -671,12 +771,99 @@ impl App {
                 self.cancel_worker();
                 self.quit = true;
             }
-            Action::Download(url, playlist, kind) => {
+            Action::Download(url, playlist, kind, section, subtitles) => {
                 self.clear_input(kind);
-                self.start_download(url, playlist, kind, None);
+                self.start_download(url, playlist, kind, None, section, subtitles);
+            }
+            Action::InstallGlobal => {
+                let result = install::install();
+                if let Some(form) = self.stashed_settings.as_mut() {
+                    match result {
+                        Ok(message) => {
+                            form.info = Some(message);
+                            form.error = None;
+                        }
+                        Err(e) => {
+                            form.error = Some(e);
+                            form.info = None;
+                        }
+                    }
+                    form.installed = install::is_installed();
+                }
+            }
+            Action::OpenRelease(url) => release::open_in_browser(&url),
+            Action::SkipVersion(tag) => {
+                self.config.skipped_version = Some(tag);
+                if let Err(e) = self.config.save() {
+                    self.notice = Some(format!("Не удалось сохранить настройки: {e}"));
+                }
             }
             Action::Nothing => {}
         }
+    }
+
+    /// Показывает окно о новой версии, когда программа готова и других окон нет.
+    fn pump_release(&mut self) {
+        if !matches!(self.stage, Stage::Ready)
+            || self.modal.is_some()
+            || self.stashed_settings.is_some()
+        {
+            return;
+        }
+        let Some(rx) = &self.release else {
+            return;
+        };
+        let release = match rx.try_recv() {
+            Ok(release) => release,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.release = None;
+                return;
+            }
+        };
+        self.release = None;
+        self.modal = Some(Modal::Confirm(Confirm {
+            title: "Новая версия".into(),
+            body: vec![
+                format!(
+                    "Вышла новая версия rusty-tube: {} (у вас {}).",
+                    release.tag,
+                    env!("CARGO_PKG_VERSION")
+                ),
+                String::new(),
+                "«Скачать» откроет страницу релиза в браузере.".into(),
+                "Esc — напомнить при следующем запуске.".into(),
+            ],
+            yes: "Скачать",
+            no: "Пропустить эту версию",
+            yes_selected: true,
+            on_yes: Action::OpenRelease(release.url),
+            on_no: Action::SkipVersion(release.tag),
+            esc_closes: true,
+        }));
+    }
+
+    /// Кнопка «Установить» в настройках: спрашиваем, затем возвращаемся в настройки.
+    fn confirm_install_global(&mut self) {
+        let Some(Modal::Settings(form)) = self.modal.take() else {
+            return;
+        };
+        self.stashed_settings = Some(form);
+        let mut body = vec![
+            "Запускайте rusty-tube из любой папки, сделать изменения?".to_string(),
+            String::new(),
+        ];
+        body.extend(install::plan().describe());
+        self.modal = Some(Modal::Confirm(Confirm {
+            title: "Глобальная установка".into(),
+            body,
+            yes: "Да",
+            no: "Нет",
+            yes_selected: true,
+            on_yes: Action::InstallGlobal,
+            on_no: Action::Nothing,
+            esc_closes: false,
+        }));
     }
 
     fn cancel_worker(&self) {
@@ -712,7 +899,6 @@ impl App {
 
     fn open_settings(&mut self, first_run: bool) {
         self.modal = Some(Modal::Settings(SettingsForm {
-            quality: self.config.quality.index(),
             audio: self.config.audio_format.index(),
             theme: self.config.theme.index(),
             browser: self.config.browser.index(),
@@ -724,9 +910,18 @@ impl App {
             ),
             folder: Input::new(self.config.download_dir.to_string_lossy()),
             music_folder: Input::new(self.config.music_dir.to_string_lossy()),
-            focus: field::QUALITY,
+            mp3_folder: Input::new(
+                self.config
+                    .mp3_dir
+                    .as_deref()
+                    .map(|dir| dir.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            focus: field::AUDIO,
             first_run,
             error: None,
+            info: None,
+            installed: install::is_installed(),
         }));
     }
 
@@ -747,11 +942,34 @@ impl App {
     }
 
     fn submit_url(&mut self) {
+        if self.input.value().trim().is_empty() {
+            self.notice = Some("Вставьте ссылку на видео".into());
+            self.focus = Focus::Input;
+            return;
+        }
         let Some(url) = download::normalize_url(self.input.value()) else {
             self.notice = Some("Это не похоже на ссылку YouTube".into());
+            self.focus = Focus::Input;
             return;
         };
-        self.begin_download(url, Kind::Video);
+        let section = if self.full_video {
+            None
+        } else {
+            match timecode::parse_section(self.range_from.value(), self.range_to.value()) {
+                Ok(section) => section,
+                Err(e) => {
+                    self.notice = Some(e.message);
+                    self.focus = match e.bound {
+                        Bound::From => Focus::From,
+                        Bound::To => Focus::To,
+                    };
+                    return;
+                }
+            }
+        };
+        let kind = self.video_kind();
+        let subtitles = self.subtitles && kind == Kind::Video;
+        self.begin_download(url, kind, section, subtitles);
     }
 
     /// Enter в режиме музыки: ссылку качаем сразу, остальное ищем.
@@ -761,7 +979,7 @@ impl App {
             return;
         }
         if let Some(url) = download::normalize_url(&text) {
-            self.begin_download(url, Kind::Audio);
+            self.begin_download(url, Kind::Audio, None, false);
             return;
         }
         if self.downloading() {
@@ -804,7 +1022,13 @@ impl App {
     }
 
     /// Проверки перед загрузкой по ссылке; для видео из плейлиста — вопрос, что качать.
-    fn begin_download(&mut self, url: String, kind: Kind) {
+    fn begin_download(
+        &mut self,
+        url: String,
+        kind: Kind,
+        section: Option<Section>,
+        subtitles: bool,
+    ) {
         if self.downloading() {
             self.notice = Some("Дождитесь окончания текущей загрузки или прервите её (Esc)".into());
             return;
@@ -815,7 +1039,7 @@ impl App {
         self.notice = None;
         if download::is_video_in_playlist(&url) {
             let (what, this) = match kind {
-                Kind::Video => ("видео", "только это видео"),
+                Kind::Video | Kind::Mp3 => ("видео", "только это видео"),
                 Kind::Audio => ("трек", "только этот трек"),
             };
             // Ссылка остаётся в поле, пока пользователь не выберет (Esc — отмена).
@@ -828,19 +1052,19 @@ impl App {
                 ],
                 yes: "Весь плейлист",
                 no: match kind {
-                    Kind::Video => "Только это видео",
+                    Kind::Video | Kind::Mp3 => "Только это видео",
                     Kind::Audio => "Только этот трек",
                 },
                 yes_selected: false,
-                on_yes: Action::Download(url.clone(), true, kind),
-                on_no: Action::Download(url, false, kind),
+                on_yes: Action::Download(url.clone(), true, kind, section, subtitles),
+                on_no: Action::Download(url, false, kind, section, subtitles),
                 esc_closes: true,
             }));
             return;
         }
         let playlist = download::is_playlist(&url) || music::is_album(&url);
         self.clear_input(kind);
-        self.start_download(url, playlist, kind, None);
+        self.start_download(url, playlist, kind, None, section, subtitles);
     }
 
     /// Enter на результате поиска.
@@ -867,13 +1091,14 @@ impl App {
             "" => track.name().to_string(),
             artist => format!("{artist} — {}", track.name()),
         };
-        self.start_download(track.url(), false, Kind::Audio, Some(label));
+        self.start_download(track.url(), false, Kind::Audio, Some(label), None, false);
     }
 
     fn dir_for(&self, kind: Kind) -> PathBuf {
         match kind {
             Kind::Video => self.config.download_dir.clone(),
             Kind::Audio => self.config.music_dir.clone(),
+            Kind::Mp3 => self.config.mp3_folder().to_path_buf(),
         }
     }
 
@@ -889,14 +1114,32 @@ impl App {
 
     fn clear_input(&mut self, kind: Kind) {
         match kind {
-            Kind::Video => self.input.clear(),
+            Kind::Video | Kind::Mp3 => self.input.clear(),
             Kind::Audio => self.query.clear(),
         }
     }
 
-    fn start_download(&mut self, url: String, playlist: bool, kind: Kind, label: Option<String>) {
+    fn start_download(
+        &mut self,
+        url: String,
+        playlist: bool,
+        kind: Kind,
+        label: Option<String>,
+        section: Option<Section>,
+        subtitles: bool,
+    ) {
+        let mut label = label.unwrap_or_else(|| url.clone());
+        if kind == Kind::Mp3 {
+            label.push_str(" · MP3");
+        }
+        if let Some(section) = &section {
+            label.push_str(&format!(" · фрагмент {}", section.label()));
+        }
+        if subtitles {
+            label.push_str(" · субтитры");
+        }
         self.download = Some(DownloadView {
-            label: label.unwrap_or_else(|| url.clone()),
+            label,
             kind,
             dir: self.dir_for(kind),
             playlist,
@@ -910,6 +1153,8 @@ impl App {
             url,
             kind,
             playlist,
+            section,
+            subtitles,
             config: self.config.clone(),
             yt_dlp: self.packages.yt_dlp(),
             ffmpeg_dir: self.packages.ffmpeg_dir(),
@@ -923,7 +1168,7 @@ impl App {
         let dir = match &self.download {
             Some(view) => view.dir.clone(),
             None => self.dir_for(match self.mode {
-                Mode::Video => Kind::Video,
+                Mode::Video => self.video_kind(),
                 Mode::Music => Kind::Audio,
             }),
         };
@@ -945,6 +1190,90 @@ impl App {
         }
     }
 
+    fn range_input_mut(&mut self) -> Option<&mut Input> {
+        match self.focus {
+            Focus::From => Some(&mut self.range_from),
+            Focus::To => Some(&mut self.range_to),
+            _ => None,
+        }
+    }
+
+    /// Вставка в поле времени: только цифры, «:» и «.».
+    fn paste_time(&mut self, text: &str) {
+        let filtered: String = text
+            .trim()
+            .chars()
+            .filter_map(timecode::time_char)
+            .collect();
+        if let Some(input) = self.range_input_mut() {
+            input.insert_str(&filtered);
+        }
+        self.notice = None;
+    }
+
+    /// Пробел, клик или ←→ на элементе блока параметров: переключить или выбрать
+    /// следующее (`forward`) или предыдущее значение.
+    fn activate(&mut self, control: Focus, forward: bool) {
+        if !self.control_enabled(control) {
+            return;
+        }
+        match control {
+            Focus::Options => self.options_open = !self.options_open,
+            Focus::Mp3 => self.to_mp3 = !self.to_mp3,
+            Focus::Range => self.full_video = !self.full_video,
+            Focus::Subtitles => self.subtitles = !self.subtitles,
+            Focus::Quality => {
+                let n = Quality::ALL.len();
+                let i = self.config.quality.index();
+                let i = if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                };
+                self.config.quality = Quality::ALL[i];
+                // Выбор качества запоминается между запусками, как раньше в настройках.
+                if let Err(e) = self.config.save() {
+                    self.notice = Some(format!("Не удалось сохранить настройки: {e}"));
+                    return;
+                }
+            }
+            _ => return,
+        }
+        self.notice = None;
+    }
+
+    /// ↑↓ по строкам блока параметров; выше первой строки — поле ссылки.
+    fn move_option_row(&mut self, down: bool) {
+        let rows: Vec<Vec<Focus>> = self
+            .option_rows()
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .filter(|c| self.control_enabled(*c))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|row| !row.is_empty())
+            .collect();
+        let Some((r, c)) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(r, row)| row.iter().position(|f| *f == self.focus).map(|c| (r, c)))
+        else {
+            self.focus = Focus::Input;
+            return;
+        };
+        if down {
+            if let Some(row) = rows.get(r + 1) {
+                self.focus = row[c.min(row.len() - 1)];
+            }
+        } else if r == 0 {
+            self.focus = Focus::Input;
+        } else {
+            let row = &rows[r - 1];
+            self.focus = row[c.min(row.len() - 1)];
+        }
+    }
+
     // ---------------------------------------------------------------- ввод
 
     fn on_event(&mut self, event: TermEvent) {
@@ -953,6 +1282,7 @@ impl App {
             TermEvent::Mouse(mouse) => self.on_mouse(mouse),
             TermEvent::Paste(text) => match &mut self.modal {
                 Some(Modal::Settings(form)) => form.paste(&text),
+                None if matches!(self.focus, Focus::From | Focus::To) => self.paste_time(&text),
                 None => {
                     self.focus = Focus::Input;
                     self.current_input_mut().insert_str(text.trim());
@@ -996,6 +1326,7 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => {
                 // Список результатов — в цикле, только когда он есть.
                 let mut order = vec![Focus::Input];
+                order.extend(self.video_controls());
                 if self.has_results() {
                     order.push(Focus::Results);
                 }
@@ -1033,6 +1364,10 @@ impl App {
                 _ => {}
             },
             Focus::Results => self.on_results_key(key),
+            Focus::Options | Focus::Quality | Focus::Mp3 | Focus::Range | Focus::Subtitles => {
+                self.on_option_key(key)
+            }
+            Focus::From | Focus::To => self.on_range_key(key),
             Focus::Input => match key.code {
                 KeyCode::Enter => self.submit(),
                 KeyCode::Esc if self.downloading() => self.confirm_cancel_download(),
@@ -1045,6 +1380,7 @@ impl App {
                     self.notice = None;
                 }
                 KeyCode::Down if self.has_results() => self.focus = Focus::Results,
+                KeyCode::Down if self.mode == Mode::Video => self.focus = Focus::Options,
                 KeyCode::Up => self.focus = Focus::Settings,
                 KeyCode::Char('v') if ctrl => self.paste_into_input(),
                 KeyCode::Insert if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1056,6 +1392,71 @@ impl App {
                     }
                 }
             },
+        }
+    }
+
+    /// Блок параметров: пробел — переключить, ←→ — значение, Enter — скачать
+    /// (на заголовке — раскрыть или свернуть).
+    fn on_option_key(&mut self, key: KeyEvent) {
+        if self.mode != Mode::Video {
+            self.focus = Focus::Input;
+            return;
+        }
+        let selector = matches!(self.focus, Focus::Quality | Focus::Range);
+        let header = self.focus == Focus::Options;
+        match key.code {
+            KeyCode::Char(' ') => self.activate(self.focus, true),
+            KeyCode::Enter if header => self.activate(Focus::Options, true),
+            KeyCode::Enter => self.submit(),
+            KeyCode::Left | KeyCode::Right if selector => {
+                self.activate(self.focus, key.code == KeyCode::Right)
+            }
+            // На заголовке: → раскрыть, ← свернуть.
+            KeyCode::Right if header => self.options_open = true,
+            KeyCode::Left if header => self.options_open = false,
+            KeyCode::Up => self.move_option_row(false),
+            KeyCode::Down => self.move_option_row(true),
+            KeyCode::Esc if self.downloading() => self.confirm_cancel_download(),
+            KeyCode::Esc => self.focus = Focus::Input,
+            _ => {}
+        }
+    }
+
+    /// Поля «от» и «до»: ввод времени, Enter — скачать.
+    fn on_range_key(&mut self, key: KeyEvent) {
+        if self.mode != Mode::Video || self.full_video || !self.options_open {
+            self.focus = Focus::Input;
+            return;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let pasted = (ctrl && key.code == KeyCode::Char('v'))
+            || (key.code == KeyCode::Insert && key.modifiers.contains(KeyModifiers::SHIFT));
+        match key.code {
+            _ if pasted => {
+                if let Some(text) = clipboard_text() {
+                    self.paste_time(&text);
+                }
+            }
+            KeyCode::Enter => self.submit(),
+            KeyCode::Up => self.move_option_row(false),
+            KeyCode::Down => self.move_option_row(true),
+            KeyCode::Esc if self.downloading() => self.confirm_cancel_download(),
+            KeyCode::Esc => self.focus = Focus::Input,
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(c) = timecode::time_char(c)
+                    && let Some(input) = self.range_input_mut()
+                {
+                    input.insert_str(&c.to_string());
+                    self.notice = None;
+                }
+            }
+            _ => {
+                if let Some(input) = self.range_input_mut()
+                    && input.handle_key(&key)
+                {
+                    self.notice = None;
+                }
+            }
         }
     }
 
@@ -1126,6 +1527,11 @@ impl App {
         if let Some(Modal::Confirm(confirm)) = self.modal.take() {
             self.run_action(if yes { confirm.on_yes } else { confirm.on_no });
         }
+        if self.modal.is_none()
+            && let Some(form) = self.stashed_settings.take()
+        {
+            self.modal = Some(Modal::Settings(form));
+        }
     }
 
     fn on_settings_key(&mut self, key: KeyEvent) {
@@ -1146,6 +1552,7 @@ impl App {
                 field::PROXY => form.focus = field::FOLDER,
                 field::FOLDER => form.focus = field::BROWSE,
                 field::MUSIC_FOLDER => form.focus = field::MUSIC_BROWSE,
+                field::MP3_FOLDER => form.focus = field::MP3_BROWSE,
                 _ => self.activate_settings_field(),
             },
             KeyCode::Char(' ') if !form.is_text_field() => self.activate_settings_field(),
@@ -1163,8 +1570,10 @@ impl App {
                     }
                 } else if form.focus == field::FOLDER {
                     form.folder.handle_key(&key);
-                } else {
+                } else if form.focus == field::MUSIC_FOLDER {
                     form.music_folder.handle_key(&key);
+                } else {
+                    form.mp3_folder.handle_key(&key);
                 }
                 form.error = None;
             }
@@ -1177,17 +1586,20 @@ impl App {
             return;
         };
         match form.focus {
-            field::QUALITY | field::AUDIO | field::THEME | field::BROWSER => {
-                cycle_selector(form, true)
-            }
-            field::BROWSE | field::MUSIC_BROWSE => {
-                let (input, title) = if form.focus == field::BROWSE {
-                    (&mut form.folder, "Папка для сохранения видео")
-                } else {
-                    (&mut form.music_folder, "Папка для сохранения музыки")
+            field::AUDIO | field::THEME | field::BROWSER => cycle_selector(form, true),
+            field::BROWSE | field::MUSIC_BROWSE | field::MP3_BROWSE => {
+                let video_folder = PathBuf::from(form.folder.value());
+                let (input, title) = match form.focus {
+                    field::BROWSE => (&mut form.folder, "Папка для сохранения видео"),
+                    field::MUSIC_BROWSE => (&mut form.music_folder, "Папка для сохранения музыки"),
+                    _ => (&mut form.mp3_folder, "Папка для сохранения MP3"),
                 };
                 // Нативный диалог ОС; TUI на это время замирает.
-                let current = PathBuf::from(input.value());
+                // Пустая папка MP3 означает папку видео — с неё и начинаем.
+                let current = match input.value() {
+                    "" => video_folder,
+                    value => PathBuf::from(value),
+                };
                 let mut dialog = rfd::FileDialog::new().set_title(title);
                 if current.is_dir() {
                     dialog = dialog.set_directory(&current);
@@ -1197,6 +1609,7 @@ impl App {
                     form.error = None;
                 }
             }
+            field::GLOBAL => self.confirm_install_global(),
             field::SAVE => self.save_settings(),
             field::CANCEL => self.modal = None,
             _ => {}
@@ -1223,6 +1636,19 @@ impl App {
                 return;
             }
         };
+        // Папка MP3 необязательна: пусто — сохранять туда же, куда видео.
+        let mp3_dir = if clean_folder(&form.mp3_folder).is_empty() {
+            None
+        } else {
+            match checked_dir(&form.mp3_folder) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    form.error = Some(e);
+                    form.focus = field::MP3_FOLDER;
+                    return;
+                }
+            }
+        };
         let port = form.proxy.value().trim();
         let proxy_port = if port.is_empty() {
             None
@@ -1239,11 +1665,13 @@ impl App {
         let config = Config {
             download_dir: dir,
             music_dir,
-            quality: Quality::ALL[form.quality],
+            mp3_dir,
+            quality: self.config.quality,
             audio_format: AudioFormat::ALL[form.audio],
             browser: Browser::ALL[form.browser],
             proxy_port,
             theme: Theme::ALL[form.theme],
+            skipped_version: self.config.skipped_version.clone(),
         };
         if let Err(e) = config.save() {
             form.error = Some(format!("Не удалось сохранить настройки: {e}"));
@@ -1254,6 +1682,7 @@ impl App {
         self.config = config;
         self.modal = None;
         if browser_changed {
+            self.cookie_warning = None;
             // Старый файл — от другого браузера, использовать его нельзя.
             let _ = fs::remove_file(config::cookies_path());
             self.cookies_refreshed = false;
@@ -1332,9 +1761,20 @@ impl App {
             .iter()
             .find(|(r, _)| r.contains(pos))
             .map(|(_, i)| *i);
+        let control = self
+            .hits
+            .controls
+            .iter()
+            .find(|(r, _)| r.contains(pos))
+            .map(|(_, f)| *f);
         if let Some(mode) = mode {
             if mode != self.mode {
                 self.switch_mode();
+            }
+        } else if let Some(control) = control {
+            if self.control_enabled(control) {
+                self.focus = control;
+                self.activate(control, true);
             }
         } else if let Some(index) = row {
             // Первый клик выбирает трек, клик по выбранному — скачивает.
@@ -1358,8 +1798,12 @@ impl App {
 }
 
 /// Папка из поля настроек: не пустая и создаётся.
+fn clean_folder(input: &Input) -> &str {
+    input.value().trim().trim_matches('"').trim()
+}
+
 fn checked_dir(input: &Input) -> Result<PathBuf, String> {
-    let folder = input.value().trim().trim_matches('"');
+    let folder = clean_folder(input);
     if folder.is_empty() {
         return Err("Укажите папку для сохранения".into());
     }
@@ -1370,7 +1814,6 @@ fn checked_dir(input: &Input) -> Result<PathBuf, String> {
 
 fn cycle_selector(form: &mut SettingsForm, forward: bool) {
     let (value, len) = match form.focus {
-        field::QUALITY => (&mut form.quality, Quality::ALL.len()),
         field::AUDIO => (&mut form.audio, AudioFormat::ALL.len()),
         field::THEME => (&mut form.theme, Theme::ALL.len()),
         field::BROWSER => (&mut form.browser, Browser::ALL.len()),

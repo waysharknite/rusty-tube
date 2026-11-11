@@ -71,6 +71,15 @@ impl Ctx {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
+
+    #[cfg(test)]
+    pub fn for_test(tx: Sender<Event>) -> Ctx {
+        Ctx {
+            tx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            pid: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 pub struct Worker {
@@ -142,7 +151,7 @@ fn kill_tree(pid: u32) {
 
 /// Windows: своя скрытая консоль, чтобы процесс не рисовал поверх TUI.
 /// Unix: своя группа процессов, чтобы при отмене убить и потомков (ffmpeg).
-fn isolate(cmd: &mut Command) {
+pub fn isolate(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -1,6 +1,9 @@
 //! Пользовательские настройки и пути к файлам приложения.
 
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -256,12 +259,16 @@ pub struct Config {
     pub download_dir: PathBuf,
     /// Папка для режима музыки.
     pub music_dir: PathBuf,
+    /// Папка для MP3, сконвертированных из видео; `None` — туда же, куда видео.
+    pub mp3_dir: Option<PathBuf>,
     pub browser: Browser,
     pub quality: Quality,
     pub audio_format: AudioFormat,
     /// Порт локального SOCKS5-прокси (VPN-клиента) на 127.0.0.1; `None` — без прокси.
     pub proxy_port: Option<u16>,
     pub theme: Theme,
+    /// Версия программы, о которой пользователь попросил не напоминать (тег релиза).
+    pub skipped_version: Option<String>,
 }
 
 impl Default for Config {
@@ -269,11 +276,13 @@ impl Default for Config {
         Self {
             download_dir: default_download_dir(),
             music_dir: default_music_dir(),
+            mp3_dir: None,
             browser: Browser::default(),
             quality: Quality::default(),
             audio_format: AudioFormat::default(),
             proxy_port: None,
             theme: Theme::default(),
+            skipped_version: None,
         }
     }
 }
@@ -290,6 +299,14 @@ impl Config {
     pub fn proxy_url(&self) -> Option<String> {
         self.proxy_port
             .map(|port| format!("socks5h://127.0.0.1:{port}"))
+    }
+
+    /// Куда сохранять MP3 из видео: своя папка или папка видео.
+    pub fn mp3_folder(&self) -> &Path {
+        self.mp3_dir
+            .as_deref()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or(&self.download_dir)
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -416,6 +433,22 @@ mod tests {
             toml::from_str::<Config>(&text).unwrap().theme,
             Theme::HackerLight
         );
+    }
+
+    #[test]
+    fn mp3_dir_defaults_to_video_dir() {
+        let mut config = Config::default();
+        assert_eq!(config.mp3_folder(), config.download_dir.as_path());
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(!text.contains("mp3_dir"));
+
+        config.mp3_dir = Some(PathBuf::from(""));
+        assert_eq!(config.mp3_folder(), config.download_dir.as_path());
+
+        config.mp3_dir = Some(PathBuf::from("D:/mp3"));
+        let text = toml::to_string_pretty(&config).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.mp3_folder(), Path::new("D:/mp3"));
     }
 
     #[test]
