@@ -81,7 +81,58 @@ impl Input {
     }
 }
 
+/// Ctrl+буква при русской раскладке → та же клавиша в латинице.
+///
+/// В классической консоли Windows (conhost) Ctrl+V приходит в программу как нажатие,
+/// и crossterm переводит клавишу в символ по текущей раскладке: при русской выходит
+/// Ctrl+м, и сочетания не срабатывают. Windows Terminal вставку обрабатывает сам.
+pub fn latin_shortcut(mut key: KeyEvent) -> KeyEvent {
+    const CYRILLIC: &str = "йцукенгшщзфывапролдячсмить";
+    const LATIN: &str = "qwertyuiopasdfghjklzxcvbnm";
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && let KeyCode::Char(c) = key.code
+        && let Some(i) = c
+            .to_lowercase()
+            .next()
+            .and_then(|c| CYRILLIC.chars().position(|r| r == c))
+    {
+        key.code = KeyCode::Char(LATIN.as_bytes()[i] as char);
+    }
+    key
+}
+
 /// Текст из системного буфера обмена.
 pub fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(c: char, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), modifiers)
+    }
+
+    #[test]
+    fn latin_shortcut_maps_russian_layout_with_ctrl() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(latin_shortcut(key('м', ctrl)).code, KeyCode::Char('v'));
+        assert_eq!(latin_shortcut(key('М', ctrl)).code, KeyCode::Char('v'));
+        assert_eq!(latin_shortcut(key('г', ctrl)).code, KeyCode::Char('u'));
+        assert_eq!(latin_shortcut(key('щ', ctrl)).code, KeyCode::Char('o'));
+        assert_eq!(latin_shortcut(key('v', ctrl)).code, KeyCode::Char('v'));
+    }
+
+    #[test]
+    fn latin_shortcut_keeps_plain_typing() {
+        assert_eq!(
+            latin_shortcut(key('м', KeyModifiers::NONE)).code,
+            KeyCode::Char('м')
+        );
+        assert_eq!(
+            latin_shortcut(key('х', KeyModifiers::CONTROL)).code,
+            KeyCode::Char('х')
+        );
+    }
 }

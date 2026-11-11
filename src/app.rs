@@ -22,7 +22,7 @@ use ratatui::{
 use crate::{
     config::{self, AudioFormat, Browser, Config, Quality, Theme},
     download::{self, DownloadSummary, Kind},
-    input::{Input, clipboard_text},
+    input::{Input, clipboard_text, latin_shortcut},
     install,
     music::{self, Track},
     packages::{self, AppUpdate, Packages},
@@ -1278,17 +1278,24 @@ impl App {
 
     fn on_event(&mut self, event: TermEvent) {
         match event {
-            TermEvent::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
+            TermEvent::Key(key) if key.kind != KeyEventKind::Release => {
+                self.on_key(latin_shortcut(key))
+            }
             TermEvent::Mouse(mouse) => self.on_mouse(mouse),
-            TermEvent::Paste(text) => match &mut self.modal {
-                Some(Modal::Settings(form)) => form.paste(&text),
-                None if matches!(self.focus, Focus::From | Focus::To) => self.paste_time(&text),
-                None => {
-                    self.focus = Focus::Input;
-                    self.current_input_mut().insert_str(text.trim());
-                }
-                _ => {}
-            },
+            TermEvent::Paste(text) => self.paste(&text),
+            _ => {}
+        }
+    }
+
+    /// Вставка текста целиком: из терминала (bracketed paste) или правым кликом.
+    fn paste(&mut self, text: &str) {
+        match &mut self.modal {
+            Some(Modal::Settings(form)) => form.paste(text),
+            None if matches!(self.focus, Focus::From | Focus::To) => self.paste_time(text),
+            None => {
+                self.focus = Focus::Input;
+                self.current_input_mut().insert_str(text.trim());
+            }
             _ => {}
         }
     }
@@ -1711,6 +1718,16 @@ impl App {
                 && let Some(search) = self.search.as_mut()
             {
                 search.move_selection(delta);
+            }
+            return;
+        }
+        // Правый клик вставляет, как в обычном окне cmd: захват мыши отключает там
+        // встроенную вставку правой кнопкой.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            if matches!(self.stage, Stage::Ready)
+                && let Some(text) = clipboard_text()
+            {
+                self.paste(&text);
             }
             return;
         }
