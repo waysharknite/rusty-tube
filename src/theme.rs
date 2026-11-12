@@ -44,10 +44,11 @@ impl Theme {
     pub fn palette(self) -> Palette {
         match self {
             // Прежний вид, но с цветами, которые не зависят от настроек терминала.
+            // Фон задан явно: иначе в PowerShell он синий, как у профиля консоли.
             Theme::Classic => Palette {
-                base: Style::new(),
+                base: Style::new().fg(c(231)).bg(c(16)),
                 text: c(231),
-                bar: c(16),
+                bar: c(235),
                 accent: c(203),
                 on_accent: c(16),
                 dim: c(245),
