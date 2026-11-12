@@ -103,8 +103,8 @@ pub fn run(ctx: &Ctx, req: Request) -> Result<Outcome, String> {
     // Cookie экспортируются из браузера один раз при запуске программы (`update_cookies`),
     // здесь используется уже сохранённый файл.
     let cookies = config::cookies_path();
-    let use_cookies = req.config.browser != Browser::None && cookies.is_file();
-    if req.config.browser != Browser::None && !use_cookies {
+    let use_cookies = req.config.cookie_browser() != Browser::None && cookies.is_file();
+    if req.config.cookie_browser() != Browser::None && !use_cookies {
         ctx.log("Файл cookie не найден — загрузка без cookie (cookie обновляются при запуске программы)");
     }
 

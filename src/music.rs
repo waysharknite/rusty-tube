@@ -79,7 +79,7 @@ pub fn is_album(url: &str) -> bool {
 pub fn run(ctx: &Ctx, req: SearchRequest) -> Result<Outcome, String> {
     ctx.step(format!("Поиск: {}", req.query));
     let cookies = config::cookies_path();
-    let use_cookies = req.config.browser != Browser::None && cookies.is_file();
+    let use_cookies = req.config.cookie_browser() != Browser::None && cookies.is_file();
 
     let mut cmd = Command::new(&req.yt_dlp);
     cmd.env("PATH", &req.path_env)

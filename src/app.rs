@@ -1,6 +1,7 @@
 //! Состояние приложения, сценарий запуска и обработка ввода.
 
 use std::{
+    cell::Cell,
     collections::VecDeque,
     fs,
     path::PathBuf,
@@ -123,16 +124,18 @@ pub mod field {
     pub const AUDIO: usize = 0;
     pub const THEME: usize = 1;
     pub const BROWSER: usize = 2;
-    pub const PROXY: usize = 3;
-    pub const FOLDER: usize = 4;
-    pub const BROWSE: usize = 5;
-    pub const MUSIC_FOLDER: usize = 6;
-    pub const MUSIC_BROWSE: usize = 7;
-    pub const MP3_FOLDER: usize = 8;
-    pub const MP3_BROWSE: usize = 9;
-    pub const GLOBAL: usize = 10;
-    pub const SAVE: usize = 11;
-    pub const CANCEL: usize = 12;
+    pub const NO_COOKIES: usize = 3;
+    pub const PROXY: usize = 4;
+    pub const FOLDER: usize = 5;
+    pub const BROWSE: usize = 6;
+    pub const MUSIC_FOLDER: usize = 7;
+    pub const MUSIC_BROWSE: usize = 8;
+    pub const MP3_FOLDER: usize = 9;
+    pub const MP3_BROWSE: usize = 10;
+    pub const NO_UPDATES: usize = 11;
+    pub const GLOBAL: usize = 12;
+    pub const SAVE: usize = 13;
+    pub const CANCEL: usize = 14;
 }
 
 pub struct SettingsForm {
@@ -140,6 +143,10 @@ pub struct SettingsForm {
     /// Пока окно открыто, интерфейс рисуется выбранной здесь темой (предпросмотр).
     pub theme: usize,
     pub browser: usize,
+    /// Галочка «Не запрашивать cookie».
+    pub no_cookies: bool,
+    /// Галочка «Не проверять обновления».
+    pub no_update_check: bool,
     /// Порт SOCKS5-прокси; пусто — без прокси.
     pub proxy: Input,
     pub folder: Input,
@@ -154,6 +161,11 @@ pub struct SettingsForm {
     pub info: Option<String>,
     /// Программа уже установлена для запуска из любой папки.
     pub installed: bool,
+    /// Прокрутка содержимого, когда окно не помещается в терминал. Пределы и
+    /// следование за фокусом считаются при отрисовке, поэтому `Cell`.
+    pub scroll: Cell<u16>,
+    /// Поле, к которому прокрутка подстроилась в последний раз.
+    pub scrolled_to: Cell<Option<usize>>,
 }
 
 impl SettingsForm {
@@ -316,8 +328,12 @@ pub struct App {
 impl App {
     pub fn new() -> App {
         let loaded = Config::load();
-        let release =
-            release::check_in_background(loaded.as_ref().and_then(|c| c.skipped_version.clone()));
+        let release = match &loaded {
+            Some(c) if c.no_update_check => None,
+            _ => Some(release::check_in_background(
+                loaded.as_ref().and_then(|c| c.skipped_version.clone()),
+            )),
+        };
         App {
             packages: Packages::locate(),
             first_run: loaded.is_none(),
@@ -345,7 +361,7 @@ impl App {
             updates_checked: false,
             cookies_refreshed: false,
             stashed_settings: None,
-            release: Some(release),
+            release,
             quit: false,
         }
     }
@@ -503,7 +519,7 @@ impl App {
             return;
         }
 
-        if !self.updates_checked {
+        if !self.updates_checked && !self.config.no_update_check {
             let packages = self.packages.clone();
             self.start_job(
                 Job::CheckUpdates,
@@ -518,8 +534,8 @@ impl App {
             return;
         }
 
-        if !self.cookies_refreshed && self.config.browser != Browser::None {
-            let browser = self.config.browser;
+        let browser = self.config.cookie_browser();
+        if !self.cookies_refreshed && browser != Browser::None {
             let yt_dlp = self.packages.yt_dlp();
             let path_env = self.packages.path_env();
             self.start_job(
@@ -902,6 +918,8 @@ impl App {
             audio: self.config.audio_format.index(),
             theme: self.config.theme.index(),
             browser: self.config.browser.index(),
+            no_cookies: self.config.no_cookies,
+            no_update_check: self.config.no_update_check,
             proxy: Input::new(
                 self.config
                     .proxy_port
@@ -922,6 +940,8 @@ impl App {
             error: None,
             info: None,
             installed: install::is_installed(),
+            scroll: Cell::new(0),
+            scrolled_to: Cell::new(None),
         }));
     }
 
@@ -1616,6 +1636,8 @@ impl App {
                     form.error = None;
                 }
             }
+            field::NO_COOKIES => form.no_cookies = !form.no_cookies,
+            field::NO_UPDATES => form.no_update_check = !form.no_update_check,
             field::GLOBAL => self.confirm_install_global(),
             field::SAVE => self.save_settings(),
             field::CANCEL => self.modal = None,
@@ -1676,6 +1698,8 @@ impl App {
             quality: self.config.quality,
             audio_format: AudioFormat::ALL[form.audio],
             browser: Browser::ALL[form.browser],
+            no_cookies: form.no_cookies,
+            no_update_check: form.no_update_check,
             proxy_port,
             theme: Theme::ALL[form.theme],
             skipped_version: self.config.skipped_version.clone(),
@@ -1685,7 +1709,8 @@ impl App {
             return;
         }
         let first_run = form.first_run;
-        let browser_changed = config.browser != self.config.browser;
+        // Сменился источник cookie: другой браузер или галочка «Не запрашивать».
+        let browser_changed = config.cookie_browser() != self.config.cookie_browser();
         self.config = config;
         self.modal = None;
         if browser_changed {
@@ -1712,7 +1737,11 @@ impl App {
             _ => None,
         };
         if let Some(delta) = scroll {
-            if self.modal.is_none()
+            if let Some(Modal::Settings(form)) = self.modal.as_ref() {
+                // Верхний предел прокрутки знает только отрисовка — она и подрежет.
+                let value = form.scroll.get().saturating_add_signed(delta as i16 * 2);
+                form.scroll.set(value);
+            } else if self.modal.is_none()
                 && self.has_results()
                 && self.hits.results.contains(pos)
                 && let Some(search) = self.search.as_mut()

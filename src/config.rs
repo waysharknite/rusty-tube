@@ -262,6 +262,10 @@ pub struct Config {
     /// Папка для MP3, сконвертированных из видео; `None` — туда же, куда видео.
     pub mp3_dir: Option<PathBuf>,
     pub browser: Browser,
+    /// Не запрашивать cookie из браузера: загрузка как без аккаунта.
+    pub no_cookies: bool,
+    /// Не проверять обновления yt-dlp/ffmpeg и новую версию программы при запуске.
+    pub no_update_check: bool,
     pub quality: Quality,
     pub audio_format: AudioFormat,
     /// Порт локального SOCKS5-прокси (VPN-клиента) на 127.0.0.1; `None` — без прокси.
@@ -278,6 +282,8 @@ impl Default for Config {
             music_dir: default_music_dir(),
             mp3_dir: None,
             browser: Browser::default(),
+            no_cookies: true,
+            no_update_check: false,
             quality: Quality::default(),
             audio_format: AudioFormat::default(),
             proxy_port: None,
@@ -292,6 +298,15 @@ impl Config {
     pub fn load() -> Option<Config> {
         let text = fs::read_to_string(config_path()?).ok()?;
         toml::from_str(&text).ok()
+    }
+
+    /// Браузер, из которого реально берутся cookie: `None`, если они отключены галочкой.
+    pub fn cookie_browser(&self) -> Browser {
+        if self.no_cookies {
+            Browser::None
+        } else {
+            self.browser
+        }
     }
 
     /// Значение для `yt-dlp --proxy`. `socks5h` — DNS тоже резолвится через прокси,
@@ -411,6 +426,35 @@ mod tests {
         assert_eq!(config.music_dir, default_music_dir());
         assert_eq!(config.browser, Browser::Yandex);
         assert_eq!(config.theme, Theme::Classic);
+    }
+
+    #[test]
+    fn cookies_off_by_default() {
+        let config = Config::default();
+        assert!(config.no_cookies);
+        assert!(!config.no_update_check);
+        assert_eq!(config.cookie_browser(), Browser::None);
+
+        // Старый конфиг без новых полей: cookie выключены, обновления проверяются.
+        let config: Config = toml::from_str(
+            "browser = \"brave\"
+",
+        )
+        .unwrap();
+        assert!(config.no_cookies);
+        assert!(!config.no_update_check);
+        assert_eq!(config.cookie_browser(), Browser::None);
+
+        let config = Config {
+            browser: Browser::Brave,
+            no_cookies: false,
+            no_update_check: true,
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&config).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.cookie_browser(), Browser::Brave);
+        assert!(loaded.no_update_check);
     }
 
     #[test]

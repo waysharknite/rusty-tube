@@ -2,10 +2,11 @@
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    buffer::Buffer,
+    layout::{Alignment, Constraint, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph, Widget, Wrap},
 };
 
 use crate::{
@@ -146,7 +147,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, p: &Palette) {
         Span::raw(format),
         sep.clone(),
         Span::styled("Cookie: ", Style::new().fg(p.dim)),
-        Span::raw(app.config.browser.label()),
+        Span::raw(app.config.cookie_browser().label()),
         sep.clone(),
         Span::styled("Прокси: ", Style::new().fg(p.dim)),
         Span::raw(
@@ -275,6 +276,18 @@ fn draw_fatal(frame: &mut Frame, message: &str, area: Rect, p: &Palette) {
     );
 }
 
+/// Надпись RUSTY-TUBE шрифтом figlet «slant»: наклонные контурные буквы из ASCII,
+/// которые есть в любом консольном шрифте.
+/// Строки одной ширины, иначе при выравнивании по центру они разъедутся.
+const LOGO: [&str; 5] = [
+    r"    ____  __  _______________  __    ________  ______  ______",
+    r"   / __ \/ / / / ___/_  __/\ \/ /   /_  __/ / / / __ )/ ____/",
+    r"  / /_/ / / / /\__ \ / /    \  /_____/ / / / / / __  / __/   ",
+    r" / _, _/ /_/ /___/ // /     / /_____/ / / /_/ / /_/ / /___   ",
+    r"/_/ |_|\____//____//_/     /_/     /_/  \____/_____/_____/   ",
+];
+const LOGO_WIDTH: u16 = 61;
+
 fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let col = column(area, 96);
     let has_search = app.mode == Mode::Music && app.search.is_some();
@@ -286,6 +299,15 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
         // Рядом со списком результатов панель загрузки поменьше.
         (true, true) => 11.min(col.height.saturating_sub(14)),
         (true, false) => 16.min(col.height.saturating_sub(7 + extra)),
+    };
+    // Логотип над полем ввода — только если хватает места и нет списка результатов.
+    let logo_height = if !has_search
+        && col.width >= LOGO_WIDTH
+        && col.height >= 6 + extra + panel_height + LOGO.len() as u16 + 1
+    {
+        LOGO.len() as u16 + 1
+    } else {
+        0
     };
     // Со списком результатов всё прижимается к верху, иначе — по центру.
     let (top, results_height, bottom) = if has_search {
@@ -303,6 +325,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     };
     let [
         _,
+        logo,
         label,
         input,
         options,
@@ -314,6 +337,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
         _,
     ] = Layout::vertical([
         top,
+        Constraint::Length(logo_height),
         Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(options_height),
@@ -336,6 +360,15 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             "Название песни, исполнитель или ссылка на трек/альбом",
         ),
     };
+    if logo_height > 0 {
+        let lines: Vec<Line> = LOGO.iter().map(|row| Line::raw(*row)).collect();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .fg(p.accent)
+                .alignment(Alignment::Center),
+            logo,
+        );
+    }
     frame.render_widget(
         Paragraph::new(title).bold().alignment(Alignment::Center),
         label,
@@ -504,7 +537,7 @@ fn draw_video_options(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette)
                 p,
             )),
             Focus::Mp3 => Some(option_checkbox(
-                frame,
+                frame.buffer_mut(),
                 value_area,
                 app.to_mp3,
                 "только звук, перекодированный в MP3",
@@ -513,7 +546,7 @@ fn draw_video_options(frame: &mut Frame, app: &mut App, area: Rect, p: &Palette)
                 p,
             )),
             Focus::Subtitles => Some(option_checkbox(
-                frame,
+                frame.buffer_mut(),
                 value_area,
                 app.subtitles && enabled,
                 if enabled {
@@ -635,7 +668,7 @@ fn option_selector(
 
 /// Галочка с пояснением справа; возвращает область для клика (галочка и текст).
 fn option_checkbox(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     checked: bool,
     note: &str,
@@ -657,7 +690,7 @@ fn option_checkbox(
         Span::styled(mark.clone(), mark_style),
         Span::styled(format!("  {note}"), Style::new().fg(p.dim)),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    Paragraph::new(line).render(area, buf);
     Rect::new(area.x, area.y, text_width(&mark) + 2 + text_width(note), 1).intersection(area)
 }
 
@@ -990,18 +1023,16 @@ fn draw_download(
 
 // ------------------------------------------------------------------ модальные окна
 
-fn button(frame: &mut Frame, area: Rect, label: &str, focused: bool, p: &Palette) {
+fn button(buf: &mut Buffer, area: Rect, label: &str, focused: bool, p: &Palette) {
     let style = if focused {
         Style::new().fg(p.on_accent).bg(p.accent).bold()
     } else {
         Style::new().fg(p.on_control).bg(p.control)
     };
-    frame.render_widget(
-        Paragraph::new(label)
-            .style(style)
-            .alignment(Alignment::Center),
-        area,
-    );
+    Paragraph::new(label)
+        .style(style)
+        .alignment(Alignment::Center)
+        .render(area, buf);
 }
 
 fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm, p: &Palette) {
@@ -1031,13 +1062,17 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, confirm: &Confirm, p: &Palette
     let x = buttons.x + buttons.width.saturating_sub(total) / 2;
     let yes_rect = Rect::new(x, buttons.y, yes_w, 1);
     let no_rect = Rect::new(x + yes_w + 2, buttons.y, no_w, 1);
-    button(frame, yes_rect, &yes, confirm.yes_selected, p);
-    button(frame, no_rect, &no, !confirm.yes_selected, p);
+    button(frame.buffer_mut(), yes_rect, &yes, confirm.yes_selected, p);
+    button(frame.buffer_mut(), no_rect, &no, !confirm.yes_selected, p);
     app.hits.modal = vec![(yes_rect, 0), (no_rect, 1)];
 }
 
+/// Высота содержимого окна настроек (без строки подсказки).
+const SETTINGS_HEIGHT: u16 = 27;
+
 fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Palette) {
-    let rect = centered(frame.area(), 78, 31);
+    // Рамка, поля сверху и снизу, промежуток и подсказка — ещё 6 строк.
+    let rect = centered(frame.area(), 78, SETTINGS_HEIGHT + 6);
     frame.render_widget(Clear, rect);
     frame.render_widget(Block::new().style(p.base), rect);
     let title = if form.first_run {
@@ -1046,204 +1081,75 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
         "Настройки"
     };
     let block = panel(title, p.accent);
-    let inner = block.inner(rect).inner(ratatui::layout::Margin::new(2, 1));
+    let inner = block.inner(rect).inner(Margin::new(2, 1));
     frame.render_widget(block, rect);
-
-    let [
-        audio,
-        theme,
-        _,
-        browser,
-        browser_hint,
-        _,
-        proxy,
-        proxy_hint,
-        _,
-        folder_label,
-        folder,
-        music_label,
-        music_folder,
-        mp3_label,
-        mp3_folder,
-        _,
-        global,
-        error,
-        buttons,
-        _,
-        help,
-    ] = Layout::vertical([
-        Constraint::Length(1), // audio
-        Constraint::Length(1), // theme
-        Constraint::Length(1),
-        Constraint::Length(1), // browser
-        Constraint::Length(1), // browser_hint
-        Constraint::Length(1),
-        Constraint::Length(1), // proxy
-        Constraint::Length(1), // proxy_hint
-        Constraint::Length(1),
-        Constraint::Length(1), // folder_label
-        Constraint::Length(3), // folder
-        Constraint::Length(1), // music_label
-        Constraint::Length(3), // music_folder
-        Constraint::Length(1), // mp3_label
-        Constraint::Length(3), // mp3_folder
-        Constraint::Length(1),
-        Constraint::Length(1), // global
-        Constraint::Length(1), // error
-        Constraint::Length(1), // buttons
+    let [viewport, _, help] = Layout::vertical([
         Constraint::Fill(1),
-        Constraint::Length(1), // help
+        Constraint::Max(1),
+        Constraint::Length(1),
     ])
     .areas(inner);
 
-    let mut hits = Vec::new();
+    // Содержимое рисуется в отдельный буфер на полную высоту, а на экран копируется
+    // видимая часть: если терминал низкий, окно прокручивается.
+    let content = Rect::new(0, 0, viewport.width, SETTINGS_HEIGHT);
+    let mut buf = Buffer::empty(content);
+    buf.set_style(content, p.base);
+    let (hits, cursor) = draw_settings_content(&mut buf, content, form, p);
 
-    selector(
-        frame,
-        audio,
-        "Формат музыки",
-        AudioFormat::ALL[form.audio].label(),
-        form.focus == field::AUDIO,
-        p,
-    );
-    hits.push((audio, field::AUDIO));
-
-    selector(
-        frame,
-        theme,
-        "Тема оформления",
-        Theme::ALL[form.theme].label(),
-        form.focus == field::THEME,
-        p,
-    );
-    hits.push((theme, field::THEME));
-
-    let chosen = Browser::ALL[form.browser];
-    selector(
-        frame,
-        browser,
-        "Cookie из браузера",
-        chosen.label(),
-        form.focus == field::BROWSER,
-        p,
-    );
-    hits.push((browser, field::BROWSER));
-    frame.render_widget(
-        Paragraph::new(format!("{:22}{}", "", chosen.location_hint())).fg(p.dim),
-        browser_hint,
-    );
-
-    // Поле порта: подпись как у селекторов, значение — подсвеченная строка ввода.
-    let proxy_focused = form.focus == field::PROXY;
-    frame.render_widget(
-        Paragraph::new(format!("{:22}", "SOCKS5 прокси (порт)")),
-        proxy,
-    );
-    let proxy_field = Rect::new(
-        proxy.x + 22,
-        proxy.y,
-        24.min(proxy.width.saturating_sub(22)),
-        1,
-    );
-    let field_style = if proxy_focused {
-        Style::new().fg(p.on_accent).bg(p.accent)
-    } else {
-        Style::new().fg(p.on_control).bg(p.control)
-    };
-    frame.render_widget(Paragraph::new("").style(field_style), proxy_field);
-    let proxy_text = proxy_field.inner(ratatui::layout::Margin::new(1, 0));
-    let (visible, cursor) = form.proxy.visible(proxy_text.width as usize);
-    frame.render_widget(Paragraph::new(visible).style(field_style), proxy_text);
-    if proxy_focused {
-        frame.set_cursor_position((proxy_text.x + cursor as u16, proxy_text.y));
+    let visible = viewport.height.min(SETTINGS_HEIGHT);
+    let max_scroll = SETTINGS_HEIGHT - visible;
+    let mut scroll = form.scroll.get().min(max_scroll);
+    // Фокус перешёл на другое поле — прокручиваем так, чтобы оно было видно.
+    if form.scrolled_to.get() != Some(form.focus) {
+        form.scrolled_to.set(Some(form.focus));
+        if let Some((r, _)) = hits.iter().find(|(_, f)| *f == form.focus) {
+            if r.bottom() > scroll + visible {
+                scroll = r.bottom().saturating_sub(visible);
+            }
+            if r.y < scroll {
+                scroll = r.y;
+            }
+        }
     }
-    hits.push((proxy_field, field::PROXY));
-    frame.render_widget(
-        Paragraph::new(format!(
-            "{:22}127.0.0.1:<порт> из VPN-клиента · пусто — без прокси",
-            ""
-        ))
-        .fg(p.dim),
-        proxy_hint,
-    );
+    form.scroll.set(scroll);
 
-    folder_field(
-        frame,
-        form,
-        &mut hits,
-        (folder_label, folder),
-        ("Папка для видео", &form.folder, ""),
-        (field::FOLDER, field::BROWSE),
-        p,
-    );
-    folder_field(
-        frame,
-        form,
-        &mut hits,
-        (music_label, music_folder),
-        ("Папка для музыки", &form.music_folder, ""),
-        (field::MUSIC_FOLDER, field::MUSIC_BROWSE),
-        p,
-    );
-    folder_field(
-        frame,
-        form,
-        &mut hits,
-        (mp3_label, mp3_folder),
-        (
-            "Путь для сохранения MP3",
-            &form.mp3_folder,
-            "пусто — в папку для видео",
-        ),
-        (field::MP3_FOLDER, field::MP3_BROWSE),
-        p,
-    );
-
-    // Глобальная установка: подпись, состояние и кнопка справа.
-    let (status, status_color) = if form.installed {
-        (format!("установлено {}", glyphs().ok), p.ok)
-    } else {
-        ("не установлено".into(), p.dim)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(format!("{:22}", "Запуск из любой папки")),
-            Span::styled(status, Style::new().fg(status_color)),
-        ])),
-        global,
-    );
-    let install_label = if form.installed {
-        "Переустановить"
-    } else {
-        "Установить"
-    };
-    let install_rect = Rect::new(global.right().saturating_sub(18), global.y, 18, 1);
-    button(
-        frame,
-        install_rect,
-        install_label,
-        form.focus == field::GLOBAL,
-        p,
-    );
-    hits.push((install_rect, field::GLOBAL));
-
-    if let Some(err) = &form.error {
-        frame.render_widget(Paragraph::new(err.as_str()).fg(p.err), error);
-    } else if let Some(info) = &form.info {
-        frame.render_widget(Paragraph::new(info.as_str()).fg(p.ok), error);
+    let screen = frame.buffer_mut();
+    for row in 0..visible {
+        for col in 0..viewport.width {
+            screen[(viewport.x + col, viewport.y + row)] = buf[(col, row + scroll)].clone();
+        }
     }
 
-    let save_w = 14;
-    let cancel_w = if form.first_run { 0 } else { 12 };
-    let total = save_w + if form.first_run { 0 } else { cancel_w + 2 };
-    let x = buttons.right().saturating_sub(total);
-    let save_rect = Rect::new(x, buttons.y, save_w, 1);
-    button(frame, save_rect, "Сохранить", form.focus == field::SAVE, p);
-    hits.push((save_rect, field::SAVE));
-    if !form.first_run {
-        let cancel_rect = Rect::new(x + save_w + 2, buttons.y, cancel_w, 1);
-        button(frame, cancel_rect, "Отмена", form.focus == field::CANCEL, p);
-        hits.push((cancel_rect, field::CANCEL));
+    // Стрелки на правой рамке: есть что прокрутить вверх или вниз.
+    let arrow_x = rect.right().saturating_sub(1);
+    let arrow_style = Style::new().fg(p.accent);
+    if visible > 0 && scroll > 0 {
+        Paragraph::new("▲")
+            .style(arrow_style)
+            .render(Rect::new(arrow_x, viewport.y, 1, 1), screen);
+    }
+    if visible > 0 && scroll < max_scroll {
+        Paragraph::new("▼")
+            .style(arrow_style)
+            .render(Rect::new(arrow_x, viewport.y + visible - 1, 1, 1), screen);
+    }
+
+    let shown = Rect::new(0, scroll, viewport.width, visible);
+    app.hits.modal = hits
+        .into_iter()
+        .filter_map(|(r, field)| {
+            let r = r.intersection(shown);
+            (!r.is_empty()).then(|| {
+                let y = viewport.y + r.y - scroll;
+                (Rect::new(viewport.x + r.x, y, r.width, r.height), field)
+            })
+        })
+        .collect();
+    if let Some(c) = cursor
+        && shown.contains(c)
+    {
+        frame.set_cursor_position((viewport.x + c.x, viewport.y + c.y - scroll));
     }
 
     let help_text = if form.first_run {
@@ -1257,22 +1163,257 @@ fn draw_settings(frame: &mut Frame, app: &mut App, form: &SettingsForm, p: &Pale
             .alignment(Alignment::Center),
         help,
     );
-    app.hits.modal = hits;
 }
 
-/// Подпись с кнопкой «Обзор…» справа и поле с путём под ней.
+/// Поля окна настроек в буфере высотой `SETTINGS_HEIGHT`. Возвращает области для
+/// клика и позицию курсора в координатах этого буфера.
+fn draw_settings_content(
+    buf: &mut Buffer,
+    area: Rect,
+    form: &SettingsForm,
+    p: &Palette,
+) -> (Vec<(Rect, usize)>, Option<Position>) {
+    let [
+        audio,
+        theme,
+        _,
+        browser,
+        no_cookies,
+        browser_hint,
+        _,
+        proxy,
+        proxy_hint,
+        _,
+        folder_label,
+        folder,
+        music_label,
+        music_folder,
+        mp3_label,
+        mp3_folder,
+        _,
+        no_updates,
+        global,
+        error,
+        buttons,
+    ] = Layout::vertical([
+        Constraint::Length(1), // audio
+        Constraint::Length(1), // theme
+        Constraint::Length(1),
+        Constraint::Length(1), // browser
+        Constraint::Length(1), // no_cookies
+        Constraint::Length(1), // browser_hint
+        Constraint::Length(1),
+        Constraint::Length(1), // proxy
+        Constraint::Length(1), // proxy_hint
+        Constraint::Length(1),
+        Constraint::Length(1), // folder_label
+        Constraint::Length(3), // folder
+        Constraint::Length(1), // music_label
+        Constraint::Length(3), // music_folder
+        Constraint::Length(1), // mp3_label
+        Constraint::Length(3), // mp3_folder
+        Constraint::Length(1),
+        Constraint::Length(1), // no_updates
+        Constraint::Length(1), // global
+        Constraint::Length(1), // error
+        Constraint::Length(1), // buttons
+    ])
+    .areas(area);
+
+    let mut hits = Vec::new();
+    let mut cursor = None;
+
+    selector(
+        buf,
+        audio,
+        "Формат музыки",
+        AudioFormat::ALL[form.audio].label(),
+        form.focus == field::AUDIO,
+        true,
+        p,
+    );
+    hits.push((audio, field::AUDIO));
+
+    selector(
+        buf,
+        theme,
+        "Тема оформления",
+        Theme::ALL[form.theme].label(),
+        form.focus == field::THEME,
+        true,
+        p,
+    );
+    hits.push((theme, field::THEME));
+
+    let chosen = Browser::ALL[form.browser];
+    selector(
+        buf,
+        browser,
+        "Cookie из браузера",
+        chosen.label(),
+        form.focus == field::BROWSER,
+        !form.no_cookies,
+        p,
+    );
+    hits.push((browser, field::BROWSER));
+    let no_cookies_rect = option_checkbox(
+        buf,
+        indented(no_cookies),
+        form.no_cookies,
+        "не запрашивать cookie (без входа в аккаунт)",
+        form.focus == field::NO_COOKIES,
+        true,
+        p,
+    );
+    hits.push((no_cookies_rect, field::NO_COOKIES));
+    if !form.no_cookies {
+        Paragraph::new(chosen.location_hint())
+            .fg(p.dim)
+            .render(indented(browser_hint), buf);
+    }
+
+    // Поле порта: подпись как у селекторов, значение — подсвеченная строка ввода.
+    let proxy_focused = form.focus == field::PROXY;
+    Paragraph::new(format!("{:22}", "SOCKS5 прокси (порт)")).render(proxy, buf);
+    let proxy_field = Rect::new(
+        proxy.x + 22,
+        proxy.y,
+        24.min(proxy.width.saturating_sub(22)),
+        1,
+    );
+    let field_style = if proxy_focused {
+        Style::new().fg(p.on_accent).bg(p.accent)
+    } else {
+        Style::new().fg(p.on_control).bg(p.control)
+    };
+    Paragraph::new("")
+        .style(field_style)
+        .render(proxy_field, buf);
+    let proxy_text = proxy_field.inner(Margin::new(1, 0));
+    let (visible, at) = form.proxy.visible(proxy_text.width as usize);
+    Paragraph::new(visible)
+        .style(field_style)
+        .render(proxy_text, buf);
+    if proxy_focused {
+        cursor = Some(Position::new(proxy_text.x + at as u16, proxy_text.y));
+    }
+    hits.push((proxy_field, field::PROXY));
+    Paragraph::new("127.0.0.1:<порт> из VPN-клиента · пусто — без прокси")
+        .fg(p.dim)
+        .render(indented(proxy_hint), buf);
+
+    let folders = [
+        (
+            (folder_label, folder),
+            ("Папка для видео", &form.folder, ""),
+            (field::FOLDER, field::BROWSE),
+        ),
+        (
+            (music_label, music_folder),
+            ("Папка для музыки", &form.music_folder, ""),
+            (field::MUSIC_FOLDER, field::MUSIC_BROWSE),
+        ),
+        (
+            (mp3_label, mp3_folder),
+            (
+                "Путь для сохранения MP3",
+                &form.mp3_folder,
+                "пусто — в папку для видео",
+            ),
+            (field::MP3_FOLDER, field::MP3_BROWSE),
+        ),
+    ];
+    for (areas, text, fields) in folders {
+        if let Some(at) = folder_field(buf, form, &mut hits, areas, text, fields, p) {
+            cursor = Some(at);
+        }
+    }
+
+    Paragraph::new("Обновления").render(no_updates, buf);
+    let no_updates_rect = option_checkbox(
+        buf,
+        indented(no_updates),
+        form.no_update_check,
+        "не проверять при запуске",
+        form.focus == field::NO_UPDATES,
+        true,
+        p,
+    );
+    hits.push((no_updates_rect, field::NO_UPDATES));
+
+    // Глобальная установка: подпись, состояние и кнопка справа.
+    let (status, status_color) = if form.installed {
+        (format!("установлено {}", glyphs().ok), p.ok)
+    } else {
+        ("не установлено".into(), p.dim)
+    };
+    Paragraph::new(Line::from(vec![
+        Span::raw(format!("{:22}", "Запуск из любой папки")),
+        Span::styled(status, Style::new().fg(status_color)),
+    ]))
+    .render(global, buf);
+    let install_label = if form.installed {
+        "Переустановить"
+    } else {
+        "Установить"
+    };
+    let install_rect = Rect::new(global.right().saturating_sub(18), global.y, 18, 1);
+    button(
+        buf,
+        install_rect,
+        install_label,
+        form.focus == field::GLOBAL,
+        p,
+    );
+    hits.push((install_rect, field::GLOBAL));
+
+    if let Some(err) = &form.error {
+        Paragraph::new(err.as_str()).fg(p.err).render(error, buf);
+    } else if let Some(info) = &form.info {
+        Paragraph::new(info.as_str()).fg(p.ok).render(error, buf);
+    }
+
+    let save_w = 14;
+    let cancel_w = if form.first_run { 0 } else { 12 };
+    let total = save_w + if form.first_run { 0 } else { cancel_w + 2 };
+    let x = buttons.right().saturating_sub(total);
+    let save_rect = Rect::new(x, buttons.y, save_w, 1);
+    button(buf, save_rect, "Сохранить", form.focus == field::SAVE, p);
+    hits.push((save_rect, field::SAVE));
+    if !form.first_run {
+        let cancel_rect = Rect::new(x + save_w + 2, buttons.y, cancel_w, 1);
+        button(buf, cancel_rect, "Отмена", form.focus == field::CANCEL, p);
+        hits.push((cancel_rect, field::CANCEL));
+    }
+
+    (hits, cursor)
+}
+
+/// Строка без колонки подписи: начинается под значениями селекторов.
+fn indented(area: Rect) -> Rect {
+    Rect::new(
+        area.x + 22,
+        area.y,
+        area.width.saturating_sub(22),
+        area.height,
+    )
+    .intersection(area)
+}
+
+/// Подпись с кнопкой «Обзор…» справа и поле с путём под ней. Возвращает позицию
+/// курсора, если поле под фокусом.
 fn folder_field(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     form: &SettingsForm,
     hits: &mut Vec<(Rect, usize)>,
     (label, area): (Rect, Rect),
     (title, input, placeholder): (&str, &Input, &str),
     (text_field, browse_field): (usize, usize),
     p: &Palette,
-) {
-    frame.render_widget(Paragraph::new(title), label);
+) -> Option<Position> {
+    Paragraph::new(title).render(label, buf);
     let browse_rect = Rect::new(label.right().saturating_sub(16), label.y, 16, 1);
-    button(frame, browse_rect, "Обзор…", form.focus == browse_field, p);
+    button(buf, browse_rect, "Обзор…", form.focus == browse_field, p);
     hits.push((browse_rect, browse_field));
 
     let focused = form.focus == text_field;
@@ -1280,25 +1421,33 @@ fn folder_field(
         .borders(Borders::ALL)
         .border_type(glyphs().border)
         .border_style(Style::new().fg(if focused { p.accent } else { p.dim }));
-    let text_area = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
-    frame.render_widget(block, area);
+    let text_area = block.inner(area).inner(Margin::new(1, 0));
+    block.render(area, buf);
     let (visible, cursor) = input.visible(text_area.width as usize);
     if input.is_empty() {
-        frame.render_widget(Paragraph::new(placeholder).fg(p.dim), text_area);
+        Paragraph::new(placeholder).fg(p.dim).render(text_area, buf);
     } else {
-        frame.render_widget(Paragraph::new(visible), text_area);
-    }
-    if focused {
-        frame.set_cursor_position((text_area.x + cursor as u16, text_area.y));
+        Paragraph::new(visible).render(text_area, buf);
     }
     hits.push((area, text_field));
+    focused.then(|| Position::new(text_area.x + cursor as u16, text_area.y))
 }
 
-fn selector(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, p: &Palette) {
+fn selector(
+    buf: &mut Buffer,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    enabled: bool,
+    p: &Palette,
+) {
     let value_style = if focused {
         Style::new().fg(p.on_accent).bg(p.accent).bold()
-    } else {
+    } else if enabled {
         Style::new().bold()
+    } else {
+        Style::new().fg(p.dim)
     };
     let arrow_style = Style::new().fg(if focused { p.accent } else { p.dim });
     let line = Line::from(vec![
@@ -1307,5 +1456,5 @@ fn selector(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bo
         Span::styled(format!(" {value:^18} "), value_style),
         Span::styled(format!(" {}", glyphs().play), arrow_style),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    Paragraph::new(line).render(area, buf);
 }
